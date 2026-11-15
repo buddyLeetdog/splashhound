@@ -1,0 +1,14 @@
+# Build output
+/src-tauri/target/
+/src-tauri/gen/
+
+# Local sample media (large binaries, not source)
+/example videos/
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
+*.log

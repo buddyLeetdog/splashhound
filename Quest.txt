@@ -1,0 +1,14 @@
+Develop a Tool for categorization and viewing of a Video collection library in Rust.
+The user should be able to select for example a root folder in which all files are included. They should be indexed in a sqlite DB with columns like:
+ File Name, Length/Duration, File Size, Path, Md5hash,Creator,NSFW,Popping,Destruction,Deflation,Inflation,Other Tags, 
+ If you want to add more columns ask if what their purpose is and if to implement them.
+
+Rating View:
+The user should be able to navigate through all uncategorized content in one view so he can rate all the videos.
+It should be possible to display the video and have some preview pics from throughout the video (maybe like 12) so it can be categorized quickly.
+
+Duplicates View:
+Here the duplicates should be displayed with an option which duplicate should be removed from the library
+
+Collection View:
+An overview of all media with filters for tags and maybe an optional random video mode where all videos where the filters were applied got shown in random order.
