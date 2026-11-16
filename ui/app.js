@@ -1915,6 +1915,11 @@ function renderOld() {
       <span class="sep"></span>
       <button class="btn tiny" id="old-cache" ${selected.size ? '' : 'disabled'}>Build playback cache</button>
       <button class="btn tiny primary" id="old-convert" ${selected.size ? '' : 'disabled'}>Convert to MP4</button>
+      <select class="select" id="old-quality" title="Encoder effort for converted files">
+        <option value="fast">Fast - quickest, smallest file</option>
+        <option value="balanced">Balanced</option>
+        <option value="quality">Quality - slowest, most detail</option>
+      </select>
       <label class="check" style="margin-left:4px;font-size:12px">
         <input type="checkbox" id="old-trash"> move originals to _trash
       </label>
@@ -1924,6 +1929,8 @@ function renderOld() {
       original files stay as they are. <strong>Convert to MP4</strong> writes a real
       <code>.mp4</code> next to the original, adds it to the library with the same tags, rating and flags,
       and optionally moves the source to <code>_trash</code>.
+      <br><strong>Quality</strong> sets the encoder effort for both: Fast is quickest and writes the
+      smallest file, Quality is slowest and keeps the most detail.
     </p>
     <table class="dup-table old-table">
       <thead>
@@ -1985,6 +1992,20 @@ function renderOld() {
   };
   $('#old-cache').onclick = () => startConvert('cache');
   $('#old-convert').onclick = () => startConvert('file');
+  const quality = $('#old-quality');
+  if (quality) {
+    quality.value = state.boot?.convertQuality || 'balanced';
+    quality.onchange = async () => {
+      try {
+        const saved = await invoke('set_convert_quality', { quality: quality.value });
+        state.boot.convertQuality = saved;
+        quality.value = saved;
+        toast(`Conversion quality: ${quality.selectedOptions[0].textContent}`);
+      } catch (err) {
+        toast(String(err), 'error');
+      }
+    };
+  }
   updateButtons();
 }
 

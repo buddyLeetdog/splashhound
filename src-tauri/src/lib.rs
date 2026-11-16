@@ -295,6 +295,7 @@ pub fn run() {
             commands::convert_start,
             commands::convert_status,
             commands::convert_cancel,
+            commands::set_convert_quality,
             commands::ensure_thumbs,
             commands::all_tags,
             commands::all_toys,

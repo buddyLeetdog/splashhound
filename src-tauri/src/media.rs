@@ -398,6 +398,65 @@ pub fn play_cache_path(state: &AppState, v: &VideoDto) -> PathBuf {
         .join(format!("{}_{}_{}.mp4", v.id, v.size, v.mtime))
 }
 
+/// Encoder effort for converted files. Affects speed, size and quality of the
+/// H.264 re-encode; remuxing (a stream copy) ignores it apart from the audio
+/// bitrate used when the source audio has to be re-encoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quality {
+    Fast,
+    Balanced,
+    Quality,
+}
+
+impl Quality {
+    pub fn parse(value: Option<&str>) -> Quality {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("fast") => Quality::Fast,
+            Some("quality") | Some("high") => Quality::Quality,
+            _ => Quality::Balanced,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Quality::Fast => "fast",
+            Quality::Balanced => "balanced",
+            Quality::Quality => "quality",
+        }
+    }
+
+    /// x264 speed/size trade-off.
+    pub fn preset(self) -> &'static str {
+        match self {
+            Quality::Fast => "veryfast",
+            Quality::Balanced => "medium",
+            Quality::Quality => "slow",
+        }
+    }
+
+    /// Constant rate factor: lower is better quality and a bigger file.
+    pub fn crf(self) -> u8 {
+        match self {
+            Quality::Fast => 23,
+            Quality::Balanced => 21,
+            Quality::Quality => 18,
+        }
+    }
+
+    pub fn audio_bitrate(self) -> &'static str {
+        match self {
+            Quality::Fast => "128k",
+            Quality::Balanced => "160k",
+            Quality::Quality => "192k",
+        }
+    }
+}
+
+/// The quality chosen in the Old codecs view.
+pub fn quality_of(state: &AppState) -> Quality {
+    Quality::parse(state.setting("convert_quality").as_deref())
+}
+
 fn set_conversion(state: &AppState, id: i64, st: &str, progress: f64, error: Option<String>) {
     if let Ok(mut jobs) = state.conversions.lock() {
         jobs.insert(
@@ -449,24 +508,25 @@ pub async fn run_conversion(state: &Arc<AppState>, v: &VideoDto, out: &Path) -> 
 
     let remux = v.playback == "remux";
     let copy_audio = audio_copyable(v.acodec.as_deref());
+    let quality = quality_of(state);
     let tmp = out.with_extension("part.mp4");
     let _ = tokio::fs::remove_file(&tmp).await;
 
-    let result = ffmpeg_convert(state, &ffmpeg, v, &tmp, remux, copy_audio).await;
+    let result = ffmpeg_convert(state, &ffmpeg, v, &tmp, remux, copy_audio, quality).await;
     let result = match result {
         Ok(()) => Ok(()),
         Err(_) if remux && copy_audio => {
             // Some audio streams cannot live in MP4 even though the video can:
             // keep the video copy and re-encode only the audio.
             let _ = tokio::fs::remove_file(&tmp).await;
-            ffmpeg_convert(state, &ffmpeg, v, &tmp, true, false).await
+            ffmpeg_convert(state, &ffmpeg, v, &tmp, true, false, quality).await
         }
         Err(e) if remux => {
             // Remux can fail on unusual files (broken timestamps, odd codecs).
             // Fall back to a full re-encode.
             let _ = tokio::fs::remove_file(&tmp).await;
             let _ = e;
-            ffmpeg_convert(state, &ffmpeg, v, &tmp, false, false).await
+            ffmpeg_convert(state, &ffmpeg, v, &tmp, false, false, quality).await
         }
         Err(e) => Err(e),
     };
@@ -491,7 +551,8 @@ pub async fn convert_to_file(state: &Arc<AppState>, v: &VideoDto, out: &Path) ->
     }
     let tmp = out.with_extension("part.mp4");
     let _ = tokio::fs::remove_file(&tmp).await;
-    ffmpeg_convert(state, &ffmpeg, v, &tmp, false, false).await?;
+    let quality = quality_of(state);
+    ffmpeg_convert(state, &ffmpeg, v, &tmp, false, false, quality).await?;
     if !tmp.is_file() {
         bail!("ffmpeg did not produce an output file");
     }
@@ -507,6 +568,7 @@ async fn ffmpeg_convert(
     out: &Path,
     remux: bool,
     copy_audio: bool,
+    quality: Quality,
 ) -> Result<()> {
     let mut cmd = quiet_command(&ffmpeg.ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-y"]);
@@ -523,14 +585,22 @@ async fn ffmpeg_convert(
             cmd.args(["-tag:v", "hvc1"]);
         }
     } else {
+        let crf = quality.crf().to_string();
         cmd.args([
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            quality.preset(),
+            "-crf",
+            crf.as_str(),
+            "-pix_fmt",
+            "yuv420p",
         ]);
     }
     if copy_audio {
         cmd.args(["-c:a", "copy"]);
     } else {
-        cmd.args(["-c:a", "aac", "-b:a", "160k"]);
+        cmd.args(["-c:a", "aac", "-b:a", quality.audio_bitrate()]);
     }
     cmd.args(["-movflags", "+faststart", "-f", "mp4"]);
     cmd.args(["-progress", "pipe:1", "-nostats"]);
@@ -835,6 +905,22 @@ mod tests {
             classify("mkv", Some("hevc"), Some("aac"), Some("yuv420p"), main),
             "remux"
         );
+    }
+
+    #[test]
+    fn quality_levels_map_to_encoder_settings() {
+        // Fast: quickest encode, bigger files.
+        assert_eq!(Quality::parse(Some("fast")).preset(), "veryfast");
+        assert_eq!(Quality::parse(Some("fast")).crf(), 23);
+        // Default when nothing (or something unknown) is stored.
+        assert_eq!(Quality::parse(None), Quality::Balanced);
+        assert_eq!(Quality::parse(Some("bogus")), Quality::Balanced);
+        assert_eq!(Quality::Balanced.preset(), "medium");
+        // Quality: slowest encode, smallest files.
+        assert_eq!(Quality::parse(Some("quality")).preset(), "slow");
+        assert_eq!(Quality::parse(Some("quality")).crf(), 18);
+        assert!(Quality::Quality.audio_bitrate() > Quality::Fast.audio_bitrate());
+        assert_eq!(Quality::parse(Some("QUALITY")).as_str(), "quality");
     }
 
     #[test]

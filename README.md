@@ -127,7 +127,10 @@ size and length. Select files and either:
   to `_trash`.
 
 Both run in the background with a progress bar, a cancel button and a list of
-failures.
+failures. **Quality** controls the encoder effort: *Fast* (x264 `veryfast`,
+CRF 23) is quickest and writes the smallest files, *Balanced* (`medium`, CRF 21)
+is the default, and *Quality* (`slow`, CRF 18) is slowest and keeps the most
+detail. The choice is remembered.
 
 ### Settings
 Library folder, scan progress/stop, ffmpeg location, database/cache/trash

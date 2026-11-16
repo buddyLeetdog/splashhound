@@ -29,6 +29,7 @@ pub struct Bootstrap {
     pub discreet: bool,
     pub hash_mode: String,
     pub cache_limit_mb: u64,
+    pub convert_quality: String,
     pub stats: db::Stats,
     pub tags: Vec<db::TagCount>,
     pub toys: Vec<db::TagCount>,
@@ -90,6 +91,7 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         toys,
         creators,
         scan: scan_state,
+        convert_quality: media::quality_of(&st).as_str().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -421,6 +423,19 @@ pub async fn convert_status(state: State<'_, Arc<AppState>>) -> Result<convert::
 pub async fn convert_cancel(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     convert::cancel(state.inner());
     Ok(())
+}
+
+#[tauri::command]
+pub async fn set_convert_quality(
+    state: State<'_, Arc<AppState>>,
+    quality: String,
+) -> Result<String, String> {
+    let parsed = media::Quality::parse(Some(&quality));
+    {
+        let conn = state.inner().db.lock().map_err(err)?;
+        db::set_setting(&conn, "convert_quality", parsed.as_str()).map_err(err)?;
+    }
+    Ok(parsed.as_str().to_string())
 }
 
 #[derive(Serialize)]
