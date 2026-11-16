@@ -300,7 +300,7 @@ async function init() {
     // Ask the webview which codecs beyond Chromium's built-in set it can decode.
     // HEVC needs the Windows "HEVC Video Extensions" package (or an OEM
     // equivalent) plus a GPU that supports it, so it has to be detected, not
-    // assumed — otherwise those files would be converted for nothing.
+    // assumed ï¿½ otherwise those files would be converted for nothing.
     const probe = document.createElement('video');
     const canPlay = (codec) =>
       probe.canPlayType(`video/mp4; codecs="${codec}"`) !== '' ||
@@ -938,7 +938,7 @@ async function loadLibrary(reset) {
     grid.innerHTML = '';
   } else if (moreButton) {
     moreButton.disabled = true;
-    moreButton.textContent = 'Loading…';
+    moreButton.textContent = 'Loadingï¿½';
   }
   state.lib.loading = true;
   grid.classList.add('loading');
@@ -1472,6 +1472,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
   const queue = [];
 
   const fail = (message) => {
+    if (freeze) freeze.remove();
     overlay.classList.remove('hidden');
     overlay.innerHTML = `<div class="player-error">${esc(message)}</div>`;
   };
@@ -1520,6 +1521,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
     ws.onclose = () => {
       if (stopped || token !== state.playerToken) return;
       if (videoEl.readyState >= 2) {
+        if (freeze) freeze.remove();
         overlay.classList.remove('hidden');
         overlay.innerHTML = '<div class="muted">Playback finished</div>';
       } else {
@@ -1552,7 +1554,12 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
              : `${m}:${String(sec).padStart(2, '0')}`;
   };
 
-  const clamp = (t) => Math.max(0, Math.min(t, duration || t));
+  const clamp = (t) => {
+    // Stop one second before the end: the decoder gets nothing from a position
+    // past the last frame and the picture would stay frozen on the held frame.
+    const max = duration > 2 ? duration - 1 : duration || t;
+    return Math.max(0, Math.min(t, max));
+  };
 
   const paint = () => {
     if (!rangeEl) return;
@@ -1578,6 +1585,28 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
       wrap.requestFullscreen().catch(() => {});
     }
   };
+
+  // The video element has no intrinsic size until the new stream sends its
+  // first frames, which made the player box collapse to ~150 px on every
+  // restart. Pin the box to the source aspect ratio instead.
+  const applyBoxSize = () => {
+    if (!wrap) return;
+    if (document.fullscreenElement) {
+      wrap.style.height = '';
+      return;
+    }
+    if (!video.width || !video.height) return;
+    const width = wrap.clientWidth;
+    if (!width) return;
+    const cap = wrap.classList.contains('detail-player') ? 0.52 : 0.64;
+    const height = Math.min(width * (video.height / video.width), window.innerHeight * cap);
+    wrap.style.height = `${Math.round(height)}px`;
+  };
+  const onFullscreenChange = () => applyBoxSize();
+  const onWindowResize = () => applyBoxSize();
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  window.addEventListener('resize', onWindowResize);
+  applyBoxSize();
 
   /** Freeze the current frame so a seek does not flash black while the new
    *  decoder starts. */
@@ -1708,6 +1737,10 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
       if (seekTimer) clearTimeout(seekTimer);
       videoEl.removeEventListener('seeking', onSeeking);
       videoEl.removeEventListener('dblclick', toggleFullscreen);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      window.removeEventListener('resize', onWindowResize);
+      if (freeze) freeze.remove();
+      if (wrap) wrap.style.height = '';
       if (controls) controls.remove();
       videoEl.controls = true;
       if (ws) { try { ws.close(); } catch {} }
@@ -2249,7 +2282,7 @@ function renderOld() {
     </div>
     <p class="muted small" style="margin:0 0 12px">
       Files whose codecs the built-in player cannot decode, plus files with
-      <span class="warn-inline">VFR</span> (variable frame rate) timestamps that make Chromium stutter —
+      <span class="warn-inline">VFR</span> (variable frame rate) timestamps that make Chromium stutter ï¿½
       VLC smooths those over, the webview does not.
       <br><strong>Build playback cache</strong> converts into the cache, so playback starts instantly but the
       original files stay as they are. <strong>Convert to MP4</strong> writes a real
