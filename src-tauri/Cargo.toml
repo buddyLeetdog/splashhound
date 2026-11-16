@@ -12,6 +12,14 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { version = "1.53.3", features = ["full"] }
+axum = { version = "0.8.4", features = ["macros"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
+walkdir = "2.5.0"
+md-5 = "0.10.6"
+anyhow = "1.0.104"
+rfd = "0.17.2"
 
 [profile.dev]
 incremental = true
