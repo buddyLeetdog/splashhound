@@ -100,7 +100,7 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         stream_window: st
             .setting("stream_window")
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(15)
+            .unwrap_or(30)
             .clamp(3, 120),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })

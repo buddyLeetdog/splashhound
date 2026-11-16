@@ -1638,7 +1638,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
   // MediaSource keeps everything that has been played until Chromium's quota
   // forces it out (~150 MB here), so trim the history ourselves: the window is
   // kept ahead, and the same amount behind for quick seeks back.
-  const windowSec = Math.max(3, Math.min(120, state.boot?.streamWindow || 15));
+  const windowSec = Math.max(3, Math.min(120, state.boot?.streamWindow || 30));
   const trimBehind = () => {
     if (!source || source.updating || !videoEl.buffered.length) return;
     const keepBack = Math.max(8, Math.min(windowSec, 60));
@@ -3496,7 +3496,7 @@ function viewSettings() {
           <select class="select" id="set-stream-window">
             <option value="5">5 seconds</option>
             <option value="15">15 seconds</option>
-            <option value="30">30 seconds</option>
+            <option value="30">30 seconds (default)</option>
             <option value="60">60 seconds</option>
           </select>
           <span class="muted small" id="stream-window-note"></span>
@@ -3504,7 +3504,7 @@ function viewSettings() {
         <p class="muted small" style="margin:6px 0 0">
           The window is kept ahead of the playhead, and the same amount behind it for quick jumps
           back — everything inside it can be seeked without restarting the decoder. It costs about
-          1 MB per second of video at 1080p, so 15 seconds ≈ 30 MB and 60 seconds ≈ 120 MB.
+          1 MB per second of video at 1080p, so the 30 second default is roughly 60 MB.
         </p>
       </section>
 

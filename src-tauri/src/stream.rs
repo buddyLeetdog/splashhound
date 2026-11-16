@@ -25,7 +25,7 @@ const HW_CANDIDATES: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf", "h264_vaa
 /// How far ahead of the playhead the decoder may run by default. Everything
 /// inside this window can be seeked without restarting the encoder, so it trades
 /// memory for instant seeking. Configurable in Settings.
-const DEFAULT_AHEAD_MS: u64 = 15_000;
+const DEFAULT_AHEAD_MS: u64 = 30_000;
 
 /// Cap for the configured window, so a typo cannot buffer minutes of video.
 const MAX_WINDOW_MS: u64 = 120_000;
