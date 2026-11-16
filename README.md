@@ -19,7 +19,8 @@ winget install Gyan.FFmpeg
 ```
 
 The app also auto-detects ffmpeg installed to a custom folder via
-**Settings → ffmpeg**.
+**Settings → ffmpeg**. On the first launch without ffmpeg it shows a setup
+prompt with the install command and a "Check again" button.
 
 ## Running
 

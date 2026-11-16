@@ -276,13 +276,86 @@ async function init() {
     await refreshMeta();
     if (state.scan?.running) startScanPolling();
     navigate('library');
+    maybePromptFfmpeg();
   } catch (err) {
     $('#view').innerHTML = `<div class="fatal">Splashhound failed to start.\n\n${esc(String(err))}</div>`;
   }
 }
 
-function navigate(view) {
-  closeAutocomplete();
+function maybePromptFfmpeg() {
+  const boot = state.boot;
+  if (!boot || boot.ffmpegOk || boot.ffmpegPromptShown) return;
+
+  let dismissed = false;
+  const remember = () => {
+    if (dismissed) return;
+    dismissed = true;
+    state.boot.ffmpegPromptShown = true;
+    invoke('dismiss_ffmpeg_prompt').catch(() => {});
+  };
+
+  modal(`
+    <h2>ffmpeg is not installed</h2>
+    <div class="modal-body">
+      <p>Splashhound can index your files without it, but ffmpeg is recommended for:</p>
+      <ul class="shortcut-list" style="margin:8px 0 14px">
+        <li><span>Duration, resolution and codec detection</span></li>
+        <li><span>Preview frames (12 per video)</span></li>
+        <li><span>Playback of MKV, FLV, WMV, AVI...</span></li>
+        <li><span>Video DNA near-duplicate analysis</span></li>
+      </ul>
+      <p class="muted small" style="margin:0 0 6px">Install it from a terminal:</p>
+      <div class="path-row">
+        <input class="input mono" id="ffmpeg-cmd" readonly value="winget install Gyan.FFmpeg">
+        <button class="btn" id="ffmpeg-copy">Copy</button>
+      </div>
+      <p class="muted small">Already have it? Point to the folder containing <code>ffmpeg.exe</code> in Settings, or install it and click Check again.</p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="ffmpeg-skip">Continue without it</button>
+      <button class="btn primary" id="ffmpeg-check">Check again</button>
+    </div>`, {
+    onMount(root, close) {
+      $('#ffmpeg-copy', root).onclick = async () => {
+        try {
+          await navigator.clipboard.writeText('winget install Gyan.FFmpeg');
+          toast('Command copied.');
+        } catch (err) {
+          const input = $('#ffmpeg-cmd', root);
+          input.select();
+          document.execCommand('copy');
+          toast('Command copied.');
+        }
+      };
+      $('#ffmpeg-skip', root).onclick = () => {
+        remember();
+        close();
+      };
+      $('#ffmpeg-check', root).onclick = async () => {
+        try {
+          const res = await invoke('check_ffmpeg');
+          if (res.ok) {
+            state.boot.ffmpegOk = true;
+            state.boot.ffmpegDir = res.dir || state.boot.ffmpegDir;
+            remember();
+            close();
+            toast('ffmpeg found. Run a scan to fill in metadata and previews.');
+            refreshMeta();
+          } else {
+            toast('Still not found. Install it, then click Check again.', 'error');
+          }
+        } catch (err) {
+          toast(String(err), 'error');
+        }
+      };
+    },
+    onClose() {
+      remember();
+    },
+  });
+}
+
+function navigate(view) {  closeAutocomplete();
   if (state.view === view) {
     if (view === 'library') loadLibrary(true);
     return;

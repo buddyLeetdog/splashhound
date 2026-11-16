@@ -24,6 +24,7 @@ pub struct Bootstrap {
     pub trash_dir: Option<String>,
     pub ffmpeg_ok: bool,
     pub ffmpeg_dir: Option<String>,
+    pub ffmpeg_prompt_shown: bool,
     pub hash_mode: String,
     pub cache_limit_mb: u64,
     pub stats: db::Stats,
@@ -64,6 +65,7 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         data_warning: st.data_warning(),
         cache_dir: st.cache_dir.to_string_lossy().to_string(),
         ffmpeg_ok: ff.is_some(),
+        ffmpeg_prompt_shown: st.setting("ffmpeg_prompt_shown").as_deref() == Some("1"),
         ffmpeg_dir: ff.map(|f| {
             f.ffmpeg
                 .parent()
@@ -859,6 +861,34 @@ pub async fn delete_trash(state: State<'_, Arc<AppState>>, id: i64) -> Result<()
 }
 
 /* --------------------------- indexing options --------------------------- */
+
+#[tauri::command]
+pub async fn dismiss_ffmpeg_prompt(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.inner().set_setting("ffmpeg_prompt_shown", "1")
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfmpegInfo {
+    pub ok: bool,
+    pub dir: Option<String>,
+}
+
+#[tauri::command]
+pub async fn check_ffmpeg(state: State<'_, Arc<AppState>>) -> Result<FfmpegInfo, String> {
+    let st = state.inner().clone();
+    st.refresh_ffmpeg();
+    let ff = st.ffmpeg();
+    Ok(FfmpegInfo {
+        ok: ff.is_some(),
+        dir: ff.map(|f| {
+            f.ffmpeg
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }),
+    })
+}
 
 #[tauri::command]
 pub async fn purge_missing(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
