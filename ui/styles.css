@@ -411,6 +411,7 @@ kbd {
   position: sticky; top: 0; z-index: 5;
 }
 .bulk-bar .small { margin-right: auto; }
+.bulk-bar .sep { width: 1px; height: 20px; background: var(--line-soft); margin: 0 4px; }
 .bulk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
 .bulk-flags { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
 .bulk-flag { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; text-transform: none; letter-spacing: 0; }
@@ -418,6 +419,13 @@ kbd {
 
 /* ---------- duplicates / tags ---------- */
 .dup-head .score { color: var(--accent); font-weight: 600; }
+.link-btn {
+  background: none; border: none; padding: 0; color: var(--text); font: inherit;
+  cursor: pointer; text-align: left; max-width: 100%;
+}
+.link-btn:hover { color: var(--accent); text-decoration: underline; }
+.old-table .fname { max-width: 420px; }
+.old-table td { vertical-align: middle; }
 .tag-manager { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; margin-bottom: 8px; }
 .tag-row { display: grid; grid-template-columns: 1fr auto auto auto; align-items: center; gap: 8px; padding: 5px 4px; border-bottom: 1px solid var(--line-soft); }
 .tag-row:last-child { border-bottom: none; }

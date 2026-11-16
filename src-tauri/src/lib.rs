@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod config;
+pub mod convert;
 pub mod db;
 pub mod dna;
 pub mod media;
@@ -90,6 +91,7 @@ pub struct AppState {
     pub scan: Arc<Mutex<ScanStatus>>,
     pub dna: Arc<Mutex<dna::DnaStatus>>,
     pub conversions: Arc<Mutex<HashMap<i64, Conversion>>>,
+    pub convert: Arc<Mutex<convert::Status>>,
     pub thumb_locks: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>>,
     pub convert_permits: Arc<tokio::sync::Semaphore>,
     pub thumb_permits: Arc<tokio::sync::Semaphore>,
@@ -121,6 +123,7 @@ impl AppState {
             scan: Arc::new(Mutex::new(ScanStatus::default())),
             dna: Arc::new(Mutex::new(dna::DnaStatus::default())),
             conversions: Arc::new(Mutex::new(HashMap::new())),
+            convert: convert::new_state(),
             thumb_locks: Arc::new(Mutex::new(HashMap::new())),
             convert_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             thumb_permits: Arc::new(tokio::sync::Semaphore::new(3)),
@@ -286,6 +289,10 @@ pub fn run() {
             commands::mark_viewed,
             commands::prepare_playback,
             commands::playback_status,
+            commands::old_codecs,
+            commands::convert_start,
+            commands::convert_status,
+            commands::convert_cancel,
             commands::ensure_thumbs,
             commands::all_tags,
             commands::all_toys,

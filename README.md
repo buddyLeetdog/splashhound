@@ -112,6 +112,21 @@ Collection overview: videos, reviewed share, total size and duration, never
 viewed, recently added, videos without toys or tags, trash and DNA progress,
 plus rating distribution, toy counts, creators and folder counts.
 
+### Old codecs
+Lists every video whose streams the built-in player cannot decode — WMV/VC-1,
+MPEG-1/2, MPEG-4 ASP (Xvid/DivX), Sorenson FLV, Indeo, MJPEG and high-bit-depth
+H.264 — with codec, resolution, size and length. Select files and either:
+
+- **Build playback cache** — converts them into the playback cache. Nothing on
+  disk changes, playback starts instantly afterwards, and the entries count
+  toward the cache limit.
+- **Convert to MP4** — writes a real `.mp4` next to the original, adds it to the
+  library with the same tags, rating and flags, and optionally moves the source
+  to `_trash`.
+
+Both run in the background with a progress bar, a cancel button and a list of
+failures.
+
 ### Settings
 Library folder, scan progress/stop, ffmpeg location, database/cache/trash
 paths, hashing mode, cache limit, tag management, metadata export/backup and

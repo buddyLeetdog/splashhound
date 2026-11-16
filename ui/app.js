@@ -396,6 +396,7 @@ function navigate(view) {  closeAutocomplete();
   if (view === 'library') viewLibrary();
   else if (view === 'rate') viewRate();
   else if (view === 'duplicates') viewDuplicates();
+  else if (view === 'old') viewOld();
   else if (view === 'trash') viewTrash();
   else if (view === 'stats') viewStats();
   else if (view === 'settings') viewSettings();
@@ -1793,6 +1794,221 @@ async function skipCurrent() {
   r.index += 1;
   refreshMeta();
   renderRateCurrent();
+}
+
+/* ---------------------------- old codecs -------------------------------- */
+
+let convertTimer = null;
+
+async function viewOld() {
+  $('#view').innerHTML = `
+    <header class="page-head">
+      <div>
+        <h1>Old codecs</h1>
+        <p class="muted" id="old-sub">Looking for formats WebView2 cannot decode...</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn" id="old-refresh">Refresh</button>
+      </div>
+    </header>
+    <div id="old-progress"></div>
+    <div id="old-body"><div class="empty">Loading...</div></div>`;
+  $('#old-refresh').onclick = () => viewOld();
+  if (!state.old) state.old = { items: [], selected: new Set() };
+  state.old.selected = new Set();
+  try {
+    state.old.items = await invoke('old_codecs');
+  } catch (err) {
+    toast(`Could not list old codecs: ${err}`, 'error');
+    state.old.items = [];
+  }
+  renderOld();
+  pollConvert();
+}
+
+function renderOld() {
+  const body = $('#old-body');
+  const sub = $('#old-sub');
+  if (!body || !state.old) return;
+  const items = state.old.items;
+  const selected = state.old.selected;
+  const bytes = items.reduce((sum, v) => sum + (v.size || 0), 0);
+  const cached = items.filter((v) => v.cached).length;
+  if (sub) {
+    sub.textContent = items.length
+      ? `${items.length} file${items.length === 1 ? '' : 's'} \u00b7 ${fmtSize(bytes)} \u00b7 ${cached} already cached for playback`
+      : 'Nothing to convert.';
+  }
+  if (!items.length) {
+    body.innerHTML = `<div class="empty">
+        <h2>No old codecs</h2>
+        <p>Every video in the library can be played by the built-in player.</p>
+      </div>`;
+    return;
+  }
+
+  body.innerHTML = `
+    <div class="bulk-bar" style="position:static;margin-bottom:12px;flex-wrap:wrap">
+      <span class="small" id="old-sel-count">${selected.size} selected</span>
+      <button class="btn tiny" id="old-select-all">Select all</button>
+      <button class="btn tiny" id="old-select-none">Clear</button>
+      <span class="sep"></span>
+      <button class="btn tiny" id="old-cache" ${selected.size ? '' : 'disabled'}>Build playback cache</button>
+      <button class="btn tiny primary" id="old-convert" ${selected.size ? '' : 'disabled'}>Convert to MP4</button>
+      <label class="check" style="margin-left:4px;font-size:12px">
+        <input type="checkbox" id="old-trash"> move originals to _trash
+      </label>
+    </div>
+    <p class="muted small" style="margin:0 0 12px">
+      <strong>Build playback cache</strong> converts into the cache, so playback starts instantly but the
+      original files stay as they are. <strong>Convert to MP4</strong> writes a real
+      <code>.mp4</code> next to the original, adds it to the library with the same tags, rating and flags,
+      and optionally moves the source to <code>_trash</code>.
+    </p>
+    <table class="dup-table old-table">
+      <thead>
+        <tr>
+          <th style="width:30px"></th>
+          <th>File</th>
+          <th style="width:150px">Codec</th>
+          <th style="width:130px">Resolution</th>
+          <th style="width:90px">Size</th>
+          <th style="width:80px">Length</th>
+          <th style="width:130px">State</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${items.map((v) => `
+          <tr data-id="${v.id}">
+            <td><input type="checkbox" class="old-check" data-id="${v.id}" ${selected.has(v.id) ? 'checked' : ''}></td>
+            <td><button class="link-btn fname" data-open="${v.id}" title="${esc(v.path)}">${esc(v.fileName)}</button></td>
+            <td class="mono small">${esc(v.vcodec || '?')}</td>
+            <td class="small">${v.width ? `${v.width}\u00d7${v.height}` : '-'}</td>
+            <td>${fmtSize(v.size)}</td>
+            <td>${v.durationMs ? fmtDur(v.durationMs) : '-'}</td>
+            <td>${v.converted
+              ? '<span class="badge">converted</span>'
+              : v.cached ? '<span class="badge">cached</span>' : '<span class="muted small">-</span>'}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+
+  const updateButtons = () => {
+    const count = selected.size;
+    const label = $('#old-sel-count');
+    if (label) label.textContent = `${count} selected`;
+    const cacheBtn = $('#old-cache');
+    const convBtn = $('#old-convert');
+    if (cacheBtn) cacheBtn.disabled = count === 0;
+    if (convBtn) convBtn.disabled = count === 0;
+  };
+
+  $$('.old-check').forEach((box) => {
+    box.onchange = () => {
+      const id = Number(box.dataset.id);
+      if (box.checked) selected.add(id); else selected.delete(id);
+      updateButtons();
+    };
+  });
+  $$('[data-open]').forEach((btn) => {
+    btn.onclick = () => openDetail(Number(btn.dataset.open));
+  });
+  $('#old-select-all').onclick = () => {
+    items.forEach((v) => selected.add(v.id));
+    $$('.old-check').forEach((box) => { box.checked = true; });
+    updateButtons();
+  };
+  $('#old-select-none').onclick = () => {
+    selected.clear();
+    $$('.old-check').forEach((box) => { box.checked = false; });
+    updateButtons();
+  };
+  $('#old-cache').onclick = () => startConvert('cache');
+  $('#old-convert').onclick = () => startConvert('file');
+  updateButtons();
+}
+
+async function startConvert(target) {
+  const ids = [...state.old.selected];
+  if (!ids.length) return;
+  if (target === 'file' && $('#old-trash')?.checked) {
+    const ok = await confirmDialog({
+      title: 'Move the originals to the trash?',
+      message: `${ids.length} file${ids.length === 1 ? '' : 's'} will be converted, added to the library, and then the original moved to _trash.\n\nYou can restore them from the Trash view.`,
+      okLabel: 'Convert and trash originals',
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  try {
+    await invoke('convert_start', {
+      ids,
+      target,
+      trashSource: target === 'file' && !!$('#old-trash')?.checked,
+    });
+    pollConvert();
+  } catch (err) {
+    toast(String(err), 'error');
+  }
+}
+
+function renderConvertProgress(status) {
+  const host = $('#old-progress');
+  if (!host) return;
+  if (!status || (!status.running && !status.finishedAt)) {
+    host.innerHTML = '';
+    return;
+  }
+  const total = status.total || 0;
+  const done = status.done || 0;
+  const pct = status.running
+    ? Math.min(100, Math.round(((done + (status.progress > 0 ? status.progress : 0)) / Math.max(1, total)) * 100))
+    : 100;
+  const title = status.running
+    ? `${status.target === 'cache' ? 'Building playback cache' : 'Converting to MP4'} \u2014 ${done} of ${total}`
+    : `Finished: ${status.ok} converted${status.failed ? `, ${status.failed} failed` : ''}`;
+  host.innerHTML = `
+    <section class="panel" style="margin-bottom:14px">
+      <div class="row between" style="align-items:center">
+        <div>
+          <h2 style="margin:0">${esc(title)}</h2>
+          ${status.running && status.current ? `<div class="muted small">${esc(status.current)}</div>` : ''}
+        </div>
+        ${status.running ? '<button class="btn tiny danger" id="old-cancel">Cancel</button>' : ''}
+      </div>
+      <div class="progress" style="margin-top:10px"><div style="width:${pct}%"></div></div>
+      ${status.errors?.length ? `<details style="margin-top:10px"><summary class="small">${status.errors.length} problem${status.errors.length === 1 ? '' : 's'}</summary>
+        <ul class="small muted" style="margin:8px 0 0 16px">${status.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></details>` : ''}
+    </section>`;
+  const cancel = $('#old-cancel');
+  if (cancel) cancel.onclick = () => invoke('convert_cancel').catch(() => {});
+}
+
+function pollConvert() {
+  if (convertTimer) return;
+  const tick = async () => {
+    let status;
+    try {
+      status = await invoke('convert_status');
+    } catch {
+      return;
+    }
+    renderConvertProgress(status);
+    if (!status.running) {
+      clearInterval(convertTimer);
+      convertTimer = null;
+      if (state.view === 'old' && state.old) {
+        try {
+          state.old.items = await invoke('old_codecs');
+        } catch {}
+        state.old.selected = new Set();
+        renderOld();
+        renderConvertProgress(status);
+      }
+    }
+  };
+  convertTimer = setInterval(tick, 900);
+  tick();
 }
 
 /* ----------------------------- duplicates -------------------------------- */

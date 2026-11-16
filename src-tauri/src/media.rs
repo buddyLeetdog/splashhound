@@ -423,6 +423,26 @@ pub async fn run_conversion(state: &Arc<AppState>, v: &VideoDto, out: &Path) -> 
     Ok(())
 }
 
+/// Transcode a file to a standalone MP4 next to a destination path. Used by
+/// the "old codecs" view to replace formats WebView2 cannot decode.
+pub async fn convert_to_file(state: &Arc<AppState>, v: &VideoDto, out: &Path) -> Result<()> {
+    let ffmpeg = state.ffmpeg().ok_or_else(|| {
+        anyhow!("ffmpeg was not found. Install ffmpeg or set its folder in Settings.")
+    })?;
+    if let Some(parent) = out.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = out.with_extension("part.mp4");
+    let _ = tokio::fs::remove_file(&tmp).await;
+    ffmpeg_convert(state, &ffmpeg, v, &tmp, false, false).await?;
+    if !tmp.is_file() {
+        bail!("ffmpeg did not produce an output file");
+    }
+    let _ = tokio::fs::remove_file(out).await;
+    tokio::fs::rename(&tmp, out).await?;
+    Ok(())
+}
+
 async fn ffmpeg_convert(
     state: &Arc<AppState>,
     ffmpeg: &Ffmpeg,

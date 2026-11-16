@@ -444,6 +444,84 @@ pub fn get_video(conn: &Connection, id: i64) -> Result<Option<VideoDto>> {
     Ok(v)
 }
 
+/// Videos whose streams WebView2 cannot decode, i.e. everything that has to be
+/// converted before it can be watched.
+pub fn old_codec_videos(conn: &Connection) -> Result<Vec<VideoDto>> {
+    let sql = format!(
+        "SELECT {} FROM videos v WHERE v.missing = 0 ORDER BY v.size DESC",
+        VIDEO_COLS
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], video_from_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let video = row?;
+        if video.playback == "transcode" {
+            out.push(video);
+        }
+    }
+    Ok(out)
+}
+
+/// Register a file created by the converter and carry over the metadata of the
+/// video it was made from.
+pub fn import_file(
+    conn: &mut Connection,
+    path: &str,
+    root: Option<&str>,
+    probe: &crate::media::ProbeInfo,
+    source_id: Option<i64>,
+) -> Result<i64> {
+    let p = Path::new(path);
+    let file_name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let meta = std::fs::metadata(p)?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let rel = root.and_then(|r| relative_to(path, r));
+    let upserted = upsert_file(
+        conn,
+        path,
+        rel.as_deref(),
+        &file_name,
+        &ext,
+        meta.len() as i64,
+        mtime,
+        crate::scan::now(),
+    )?;
+    set_metadata(conn, upserted.id, probe)?;
+
+    if let Some(source) = source_id {
+        if let Some(v) = get_video(conn, source)? {
+            let patch = VideoPatch {
+                creator: v.creator.clone(),
+                nsfw: Some(v.nsfw),
+                popping: Some(v.popping),
+                destruction: Some(v.destruction),
+                deflation: Some(v.deflation),
+                inflation: Some(v.inflation),
+                notes: v.notes.clone(),
+                rating: Some(v.rating),
+                reviewed: Some(v.reviewed),
+                tags: Some(v.tags.clone()),
+                toys: Some(v.toys.clone()),
+            };
+            let _ = save_video(conn, upserted.id, &patch);
+        }
+    }
+    Ok(upserted.id)
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VideoFilter {

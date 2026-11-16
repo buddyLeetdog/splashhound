@@ -5,7 +5,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::{config, db, dna, media, scan, AppState, ScanStatus};
+use crate::{config, convert, db, dna, media, scan, AppState, ScanStatus};
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -258,16 +258,18 @@ pub async fn duplicates(
 
 #[tauri::command]
 pub async fn remove_duplicate(state: State<'_, Arc<AppState>>, id: i64) -> Result<String, String> {
-    move_to_trash_inner(state, id).await
+    let st = state.inner().clone();
+    trash_by_id(&st, id).await
 }
 
 #[tauri::command]
 pub async fn trash_video(state: State<'_, Arc<AppState>>, id: i64) -> Result<String, String> {
-    move_to_trash_inner(state, id).await
+    let st = state.inner().clone();
+    trash_by_id(&st, id).await
 }
 
-async fn move_to_trash_inner(state: State<'_, Arc<AppState>>, id: i64) -> Result<String, String> {
-    let st = state.inner().clone();
+/// Move a video to `<library>/_trash`, keeping its metadata for a restore.
+pub(crate) async fn trash_by_id(st: &Arc<AppState>, id: i64) -> Result<String, String> {
     let video = st.video(id).ok_or("Video not found.")?;
     let root = st.root_path().ok_or("No library folder configured.")?;
     let trash = root.join("_trash");
@@ -343,6 +345,69 @@ pub async fn mark_viewed(state: State<'_, Arc<AppState>>, id: i64) -> Result<i64
     let st = state.inner().clone();
     let conn = st.db.lock().map_err(err)?;
     db::mark_viewed(&conn, id, scan::now()).map_err(err)
+}
+
+/* --------------------------- old codec view ----------------------------- */
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OldCodecItem {
+    #[serde(flatten)]
+    pub video: db::VideoDto,
+    /// A converted MP4 already exists in the playback cache.
+    pub cached: bool,
+    /// Path of a converted MP4 next to the original, if there is one.
+    pub converted: Option<String>,
+}
+
+#[tauri::command]
+pub async fn old_codecs(state: State<'_, Arc<AppState>>) -> Result<Vec<OldCodecItem>, String> {
+    let st = state.inner().clone();
+    let videos = {
+        let conn = st.db.lock().map_err(err)?;
+        db::old_codec_videos(&conn).map_err(err)?
+    };
+    Ok(videos
+        .into_iter()
+        .map(|video| OldCodecItem {
+            cached: media::play_cache_path(&st, &video).is_file(),
+            converted: converted_path(&video),
+            video,
+        })
+        .collect())
+}
+
+fn converted_path(video: &db::VideoDto) -> Option<String> {
+    let path = Path::new(&video.path);
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    let candidate = path.parent()?.join(format!("{stem}.mp4"));
+    if candidate.is_file() && candidate != path {
+        Some(candidate.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+pub async fn convert_start(
+    state: State<'_, Arc<AppState>>,
+    ids: Vec<i64>,
+    target: String,
+    trash_source: bool,
+) -> Result<(), String> {
+    let st = state.inner().clone();
+    convert::start(st, ids, target, trash_source)
+}
+
+#[tauri::command]
+pub async fn convert_status(state: State<'_, Arc<AppState>>) -> Result<convert::Status, String> {
+    Ok(convert::snapshot(state.inner()))
+}
+
+#[tauri::command]
+pub async fn convert_cancel(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    convert::cancel(state.inner());
+    Ok(())
 }
 
 #[derive(Serialize)]
