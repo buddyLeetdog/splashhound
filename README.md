@@ -139,7 +139,9 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
 - **Deleting videos**: the detail view and the Rate view have a "Move to trash"
   button, so removing something is always reversible.
 - **Detail navigation**: Prev/Next buttons and the left/right arrow keys move
-  through the current view (including while the player is fullscreen).
+  through the current view, including while the player is fullscreen (fullscreen
+  is kept when the video changes). Shift+Left/Right seeks 10 seconds,
+  Ctrl+Left/Right seeks 1 minute.
 - **Duplicates**: click a filename in either duplicate tab to open the detail
   player for that exact copy.
 - **Tags**: rename (merging into an existing name) or delete tags in Settings.

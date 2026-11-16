@@ -1286,6 +1286,39 @@ async function loadThumbs(video, container, videoEl) {
 
 /* ------------------------------ detail ---------------------------------- */
 
+function detailRightHtml(v, ids, index) {
+  return `
+    <div class="row between" style="margin-bottom:6px">
+      <span class="muted small">${index + 1} / ${ids.length}</span>
+      <div class="row gap">
+        <button class="btn tiny" id="d-prev" ${index <= 0 ? 'disabled' : ''}>Prev</button>
+        <button class="btn tiny" id="d-next" ${index >= ids.length - 1 ? 'disabled' : ''}>Next</button>
+      </div>
+    </div>
+    <div class="muted small" style="margin-bottom:8px">
+      \u2190/\u2192 switch video \u00b7 Shift+\u2190/\u2192 10s \u00b7 Ctrl+\u2190/\u2192 1min
+    </div>
+    <h2 class="detail-title">${esc(v.fileName)}</h2>
+    <div class="muted small">${esc(v.path)}</div>
+    <dl class="meta-table">
+      <dt>Duration</dt><dd>${v.durationMs ? fmtDur(v.durationMs) : '-'}</dd>
+      <dt>Size</dt><dd>${fmtSize(v.size)}</dd>
+      <dt>Resolution</dt><dd>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</dd>
+      <dt>Codecs</dt><dd>${esc(v.vcodec || '?')} / ${esc(v.acodec || 'no audio')}</dd>
+      <dt>Playback</dt><dd>${esc(v.playback)}</dd>
+      <dt>MD5</dt><dd class="mono">${esc(v.md5 || 'not hashed yet')}</dd>
+      <dt>Views</dt><dd>${v.viewCount}</dd>
+      <dt>Added</dt><dd>${fmtDate(v.addedAt)}</dd>
+    </dl>
+    ${editorHtml(v, 'd')}
+    <div class="modal-actions">
+      <button class="btn" id="d-reveal">Show in folder</button>
+      <button class="btn danger" id="d-delete">Move to trash</button>
+      <button class="btn" data-close>Close</button>
+      <button class="btn primary" id="d-save">Save</button>
+    </div>`;
+}
+
 async function openDetail(id, options = {}) {
   let v;
   try {
@@ -1315,34 +1348,7 @@ async function openDetail(id, options = {}) {
         </div>
         <div class="thumb-strip" id="d-thumbs"></div>
       </div>
-      <div class="detail-right">
-        <div class="row between" style="margin-bottom:6px">
-          <span class="muted small">${index + 1} / ${ids.length}</span>
-          <div class="row gap">
-            <button class="btn tiny" id="d-prev" ${index <= 0 ? 'disabled' : ''}>Prev</button>
-            <button class="btn tiny" id="d-next" ${index >= ids.length - 1 ? 'disabled' : ''}>Next</button>
-          </div>
-        </div>
-        <h2 class="detail-title">${esc(v.fileName)}</h2>
-        <div class="muted small">${esc(v.path)}</div>
-        <dl class="meta-table">
-          <dt>Duration</dt><dd>${v.durationMs ? fmtDur(v.durationMs) : '-'}</dd>
-          <dt>Size</dt><dd>${fmtSize(v.size)}</dd>
-          <dt>Resolution</dt><dd>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</dd>
-          <dt>Codecs</dt><dd>${esc(v.vcodec || '?')} / ${esc(v.acodec || 'no audio')}</dd>
-          <dt>Playback</dt><dd>${esc(v.playback)}</dd>
-          <dt>MD5</dt><dd class="mono">${esc(v.md5 || 'not hashed yet')}</dd>
-          <dt>Views</dt><dd>${v.viewCount}</dd>
-          <dt>Added</dt><dd>${fmtDate(v.addedAt)}</dd>
-        </dl>
-        ${editorHtml(v, 'd')}
-        <div class="modal-actions">
-          <button class="btn" id="d-reveal">Show in folder</button>
-          <button class="btn danger" id="d-delete">Move to trash</button>
-          <button class="btn" data-close>Close</button>
-          <button class="btn primary" id="d-save">Save</button>
-        </div>
-      </div>
+      <div class="detail-right" id="d-right"></div>
     </div>`, {
     className: 'wide',
     onClose() {
@@ -1350,55 +1356,70 @@ async function openDetail(id, options = {}) {
       state.playerToken += 1;
     },
     onMount(root, close) {
-      const editor = createEditor(root, 'd', v);
-      const videoEl = $('#d-video', root);
-      playVideo(videoEl, $('#d-overlay', root), v);
-      loadThumbs(v, $('#d-thumbs', root), videoEl);
-
-      const persist = async () => {
-        await invoke('save_video', { id: v.id, patch: editor.read() });
-      };
-      state.detail = { ids, index, editor, close, persist, video: v };
-
-      $('#d-prev', root).onclick = () => navigateDetail(-1);
-      $('#d-next', root).onclick = () => navigateDetail(1);
-      $('#d-reveal', root).onclick = () => {
-        invoke('reveal', { id: v.id }).catch((err) => toast(String(err), 'error'));
-      };
-      $('#d-delete', root).onclick = async () => {
-        const ok = await confirmDialog({
-          title: 'Move this video to trash?',
-          message: `${v.fileName}\n\nIt will be moved to ${state.boot?.trashDir || 'the _trash folder'} and can be restored from the Trash view.`,
-          okLabel: 'Move to trash',
-          danger: true,
-        });
-        if (!ok) {
-          // The confirm dialog replaced this modal; bring it back.
-          openDetail(v.id, { ids, index });
-          return;
-        }
-        try {
-          await invoke('trash_video', { id: v.id });
-          state.detail = null;
-          close();
-          toast('Moved to trash.');
-          await refreshMeta();
-          loadLibrary(true);
-        } catch (err) {
-          toast(String(err), 'error');
-        }
-      };
-      $('#d-save', root).onclick = async () => {
-        try {
-          await persist();
-          toast('Saved.');
-          refreshMeta();
-        } catch (err) {
-          toast(`Save failed: ${err}`, 'error');
-        }
-      };
+      mountDetail(v, ids, index, root, close, !!options.fullscreen);
     },
   });
+}
+
+/**
+ * Render the mutable part of the detail modal. The <video> element itself is
+ * never replaced, so navigating keeps fullscreen intact.
+ */
+function mountDetail(v, ids, index, root, close, fullscreen = false) {
+  const right = $('#d-right', root);
+  if (!right) return;
+  closeAutocomplete();
+  right.innerHTML = detailRightHtml(v, ids, index);
+
+  const editor = createEditor(right, 'd', v);
+  const videoEl = $('#d-video', root);
+  playVideo(videoEl, $('#d-overlay', root), v, () => {
+    if (fullscreen) videoEl.requestFullscreen().catch(() => {});
+  });
+  loadThumbs(v, $('#d-thumbs', root), videoEl);
+
+  const persist = async () => {
+    await invoke('save_video', { id: v.id, patch: editor.read() });
+  };
+  state.detail = { ids, index, editor, close, persist, video: v, root };
+
+  $('#d-prev', right).onclick = () => navigateDetail(-1);
+  $('#d-next', right).onclick = () => navigateDetail(1);
+  $('#d-reveal', right).onclick = () => {
+    invoke('reveal', { id: v.id }).catch((err) => toast(String(err), 'error'));
+  };
+  $('#d-delete', right).onclick = async () => {
+    const ok = await confirmDialog({
+      title: 'Move this video to trash?',
+      message: `${v.fileName}\n\nIt will be moved to ${state.boot?.trashDir || 'the _trash folder'} and can be restored from the Trash view.`,
+      okLabel: 'Move to trash',
+      danger: true,
+    });
+    if (!ok) {
+      // The confirm dialog replaced this modal; bring it back.
+      openDetail(v.id, { ids, index });
+      return;
+    }
+    try {
+      await invoke('trash_video', { id: v.id });
+      state.detail = null;
+      close();
+      toast('Moved to trash.');
+      await refreshMeta();
+      loadLibrary(true);
+    } catch (err) {
+      toast(String(err), 'error');
+    }
+  };
+  $('#d-save', right).onclick = async () => {
+    try {
+      await persist();
+      toast('Saved.');
+      refreshMeta();
+    } catch (err) {
+      toast(`Save failed: ${err}`, 'error');
+    }
+  };
 }
 
 async function navigateDetail(delta) {
@@ -1419,14 +1440,26 @@ async function navigateDetail(delta) {
       return;
     }
   }
-  const ids = detail.ids.slice();
+  const nextId = detail.ids[index];
   try {
     await detail.persist();
   } catch (err) {
-    /* navigating with unsaved edits: keep the last successful state */
+    /* keep navigating even if a field fails to save */
   }
-  detail.close();
-  openDetail(ids[index], { ids, index });
+  if (state.detail !== detail) return;
+  let v;
+  try {
+    v = await invoke('get_video', { id: nextId });
+  } catch (err) {
+    toast(String(err), 'error');
+    return;
+  }
+  if (!v) {
+    toast('Video not found.');
+    return;
+  }
+  if (state.detail !== detail) return;
+  mountDetail(v, detail.ids, index, detail.root, detail.close);
 }
 
 /* ------------------------------- rate ----------------------------------- */
@@ -1539,7 +1572,8 @@ function renderRateCurrent() {
         </div>
         <div class="kbd-hint">
           <kbd>Enter</kbd> save &amp; next \u00b7 <kbd>S</kbd> skip \u00b7 <kbd>1</kbd>-<kbd>5</kbd> rating<br>
-          <kbd>N</kbd> NSFW \u00b7 <kbd>P</kbd> popping \u00b7 <kbd>D</kbd> destruction \u00b7 <kbd>F</kbd> deflation \u00b7 <kbd>I</kbd> inflation
+          <kbd>N</kbd> NSFW \u00b7 <kbd>P</kbd> popping \u00b7 <kbd>D</kbd> destruction \u00b7 <kbd>F</kbd> deflation \u00b7 <kbd>I</kbd> inflation<br>
+          <kbd>Shift</kbd>+<kbd>\u2190</kbd>/<kbd>\u2192</kbd> 10s \u00b7 <kbd>Ctrl</kbd>+<kbd>\u2190</kbd>/<kbd>\u2192</kbd> 1min
         </div>
       </aside>
     </div>`;
@@ -2762,6 +2796,24 @@ function renderScanPanelOnly() {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && modalCloser) {
     modalCloser();
+    return;
+  }
+  const detailVideo = document.querySelector('#d-video');
+  const rateVideo = state.view === 'rate' ? document.querySelector('#r-video') : null;
+  const activeVideo = detailVideo || rateVideo;
+  if (activeVideo && (e.shiftKey || e.ctrlKey) && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+    const targetTag = (e.target?.tagName || '').toLowerCase();
+    if (targetTag === 'input' || targetTag === 'textarea' || targetTag === 'select') return;
+    if (modalCloser && !detailVideo) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const step = e.ctrlKey ? 60 : 10;
+    const direction = e.key === 'ArrowRight' ? 1 : -1;
+    const duration = Number.isFinite(activeVideo.duration) ? activeVideo.duration : 0;
+    let next = activeVideo.currentTime + direction * step;
+    next = Math.max(0, next);
+    if (duration > 0) next = Math.min(next, Math.max(0, duration - 0.1));
+    activeVideo.currentTime = next;
     return;
   }
   if (state.detail && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && $('#d-video')) {
