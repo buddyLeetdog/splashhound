@@ -997,6 +997,17 @@ function renderLibraryGrid() {
   grid.innerHTML = items.map(cardHtml).join('');
   $$('.poster img', grid).forEach((img) => {
     img.addEventListener('error', () => img.classList.add('broken'));
+    // Placeholder first, then swap in the real poster as soon as it is decoded
+    // (which also covers the first-generation cost).
+    const poster = img.dataset.poster;
+    if (!poster) return;
+    const pre = new Image();
+    pre.onload = () => {
+      img.classList.remove('broken');
+      img.src = poster;
+      img.classList.add('sharp');
+    };
+    pre.src = poster;
   });
 }
 
@@ -1012,7 +1023,7 @@ function cardHtml(v) {
   return `
     <article class="card ${selected ? 'selected' : ''}" data-id="${v.id}">
       <div class="poster">
-        <img loading="lazy" src="${state.media}/poster/${v.id}?k=${v.mtime}" alt="">
+        <img loading="lazy" src="${state.media}/lowres/${v.id}?k=${v.mtime}" data-poster="${state.media}/poster/${v.id}?k=${v.mtime}" alt="">
         <span class="dur">${v.durationMs ? fmtDur(v.durationMs) : '-'}</span>
         ${v.rating ? `<span class="rating-badge">\u2605 ${v.rating}</span>` : ''}
         ${v.reviewed ? '' : '<span class="new-badge">new</span>'}
@@ -2985,6 +2996,22 @@ function viewSettings() {
       </section>
 
       <section class="panel">
+        <h2>Previews</h2>
+        <p class="muted small" style="margin-top:0">
+          Each library card needs one cached frame. On a slow disk that costs ~100 ms per card, so
+          cards stay blank while you scroll. Generating them in the background makes scrolling instant.
+        </p>
+        <label class="check" style="margin:6px 0 10px">
+          <input type="checkbox" id="set-prewarm" ${b.prewarmPosters ? 'checked' : ''}>
+          Generate missing previews after a scan
+        </label>
+        <div class="row gap" style="align-items:center">
+          <button class="btn" id="set-prewarm-now">Generate missing previews now</button>
+          <span class="small muted" id="prewarm-line"></span>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>Indexing &amp; cache</h2>
         <div class="field">
           <label>Duplicate hashing</label>
@@ -3155,6 +3182,42 @@ function viewSettings() {
     }
   };
   loadCacheSize();
+
+  const refreshPrewarm = async () => {
+    try {
+      const st = await invoke('prewarm_status');
+      const line = $('#prewarm-line');
+      if (line) {
+        if (st.running) {
+          line.textContent = `Generating ${st.done} / ${st.total}...`;
+        } else if (st.finishedAt) {
+          line.textContent = `Done: ${st.generated} generated${st.failed ? `, ${st.failed} skipped` : ''}`;
+        } else {
+          line.textContent = '';
+        }
+      }
+      if (st.running) setTimeout(refreshPrewarm, 1000);
+    } catch (err) {
+      /* ignore */
+    }
+  };
+  $('#set-prewarm').onchange = async (e) => {
+    try {
+      await invoke('set_prewarm_enabled', { enabled: e.target.checked });
+      state.boot.prewarmPosters = e.target.checked;
+    } catch (err) {
+      toast(String(err), 'error');
+    }
+  };
+  $('#set-prewarm-now').onclick = async () => {
+    try {
+      await invoke('start_prewarm');
+      refreshPrewarm();
+    } catch (err) {
+      toast(String(err), 'error');
+    }
+  };
+  refreshPrewarm();
 
   $('#set-refresh-cache').onclick = loadCacheSize;
   const moveDatabase = async (target) => {

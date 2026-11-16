@@ -14,7 +14,7 @@ use md5::{Digest, Md5};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-use crate::{db::VideoDto, AppState, Conversion, Ffmpeg};
+use crate::{db, db::VideoDto, AppState, Conversion, Ffmpeg};
 
 /// Spawn a process without flashing a console window. The app is built as a
 /// GUI-subsystem binary, so every child process would otherwise get its own
@@ -56,7 +56,7 @@ pub fn parse_frame_rate(value: Option<&str>) -> Option<f64> {
         return None;
     }
     let fps = num / den;
-    if (1.0..=240.0).contains(&fps) {
+    if (1.0..=1000.0).contains(&fps) {
         Some((fps * 1000.0).round() / 1000.0)
     } else {
         None
@@ -281,22 +281,38 @@ pub async fn probe(ffprobe: &Path, file: &Path) -> Result<ProbeInfo> {
                             .map(|s| s.to_string());
                         // A frame rate range wider than a couple of percent means
                         // the file has irregular timestamps (variable frame rate),
-                        // which Chromium renders with visible stutter.
+                        // which Chromium renders with visible stutter. Files with
+                        // gaps but steady deltas only show up as missing frames,
+                        // so compare the frame count with the expected one as well.
                         let avg =
                             parse_frame_rate(stream.get("avg_frame_rate").and_then(|v| v.as_str()));
                         let max =
                             parse_frame_rate(stream.get("r_frame_rate").and_then(|v| v.as_str()));
-                        info.fps = avg;
-                        info.vfr = match (avg, max) {
-                            (Some(avg), Some(max)) => max > avg * 1.05,
-                            _ => false,
-                        };
-                        if info.duration_ms.is_none() {
-                            info.duration_ms = stream
+                        let nb_frames = stream
+                            .get("nb_frames")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .filter(|n| *n > 1.0);
+                        let duration_ms = info.duration_ms.or_else(|| {
+                            stream
                                 .get("duration")
                                 .and_then(|v| v.as_str())
                                 .and_then(|s| s.parse::<f64>().ok())
-                                .map(|d| (d * 1000.0).round() as i64);
+                                .map(|d| (d * 1000.0).round() as i64)
+                        });
+                        // Unknown rates are stored as 0 so the file is not re-probed
+                        // on every scan.
+                        info.fps = Some(avg.unwrap_or(0.0));
+                        let rate_gap = matches!((avg, max), (Some(a), Some(m)) if m > a * 1.05);
+                        let missing_frames = match (nb_frames, avg, duration_ms) {
+                            (Some(frames), Some(a), Some(ms)) if ms > 0 => {
+                                frames < a * ms as f64 / 1000.0 * 0.97
+                            }
+                            _ => false,
+                        };
+                        info.vfr = rate_gap || missing_frames;
+                        if info.duration_ms.is_none() {
+                            info.duration_ms = duration_ms;
                         }
                     }
                 }
@@ -340,6 +356,9 @@ pub fn thumb_path(state: &AppState, v: &VideoDto, index: usize) -> PathBuf {
 }
 
 pub const THUMB_COUNT: usize = 12;
+
+/// Width of the placeholder image stored in the database.
+const LOWRES_WIDTH: u32 = 40;
 
 pub fn thumb_times(duration_ms: Option<i64>, n: usize) -> Vec<f64> {
     let seconds = duration_ms.filter(|d| *d > 0).unwrap_or(0) as f64 / 1000.0;
@@ -400,19 +419,89 @@ pub async fn ensure_thumb(state: &Arc<AppState>, v: &VideoDto, index: usize) -> 
     if out.is_file() {
         return Some(out);
     }
+    // Some files simply have no decodable frame at that position (broken old
+    // rips). Remember that, so scrolling the grid does not retry them forever.
+    let failed = out.with_extension("fail");
+    if failed.is_file() {
+        return None;
+    }
     let ffmpeg = state.ffmpeg()?;
     let lock = state.thumb_lock(v.id);
     let _guard = lock.lock().await;
     if out.is_file() {
         return Some(out);
     }
+    if failed.is_file() {
+        return None;
+    }
     tokio::fs::create_dir_all(thumb_dir(state, v)).await.ok()?;
     let times = thumb_times(v.duration_ms, THUMB_COUNT);
     let t = *times.get(index)?;
     let _permit = state.thumb_permits.acquire().await.ok()?;
     match extract_frame(&ffmpeg.ffmpeg, Path::new(&v.path), t, &out).await {
-        Ok(()) => Some(out),
-        Err(_) => None,
+        Ok(()) => {
+            if index == THUMB_COUNT / 2 {
+                ensure_lowres(state, v).await;
+            }
+            Some(out)
+        }
+        Err(_) => {
+            let _ = tokio::fs::write(&failed, b"").await;
+            None
+        }
+    }
+}
+
+/// Create (once) the tiny placeholder for the grid, derived from the cached
+/// poster. Returns true when a placeholder is available afterwards.
+pub async fn ensure_lowres(state: &Arc<AppState>, v: &VideoDto) -> bool {
+    if let Ok(conn) = state.db.lock() {
+        if db::thumb_small(&conn, v.id).is_some() {
+            return true;
+        }
+    }
+    let poster = thumb_path(state, v, THUMB_COUNT / 2);
+    if !poster.is_file() {
+        return false;
+    }
+    let Some(ffmpeg) = state.ffmpeg() else {
+        return false;
+    };
+    let tmp = poster.with_extension("low.jpg");
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let ok = quiet_command(&ffmpeg.ffmpeg)
+        .args(["-hide_banner", "-v", "error", "-nostdin", "-y", "-i"])
+        .arg(&poster)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            &format!("scale={LOWRES_WIDTH}:-2"),
+            "-q:v",
+            "8",
+        ])
+        .arg(&tmp)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let bytes = if ok {
+        tokio::fs::read(&tmp).await.ok()
+    } else {
+        None
+    };
+    let _ = tokio::fs::remove_file(&tmp).await;
+    match bytes.filter(|b| !b.is_empty()) {
+        Some(bytes) => {
+            if let Ok(conn) = state.db.lock() {
+                let _ = db::set_thumb_small(&conn, v.id, &bytes);
+            }
+            true
+        }
+        None => false,
     }
 }
 

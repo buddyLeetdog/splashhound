@@ -5,7 +5,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::{config, convert, db, dna, media, scan, AppState, ScanStatus};
+use crate::{config, convert, db, dna, media, prewarm, scan, AppState, ScanStatus};
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -30,6 +30,7 @@ pub struct Bootstrap {
     pub hash_mode: String,
     pub cache_limit_mb: u64,
     pub convert_quality: String,
+    pub prewarm_posters: bool,
     pub stats: db::Stats,
     pub tags: Vec<db::TagCount>,
     pub toys: Vec<db::TagCount>,
@@ -92,6 +93,7 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         creators,
         scan: scan_state,
         convert_quality: media::quality_of(&st).as_str().to_string(),
+        prewarm_posters: st.setting("prewarm_posters").as_deref() != Some("0"),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -436,6 +438,37 @@ pub async fn set_convert_quality(
         db::set_setting(&conn, "convert_quality", parsed.as_str()).map_err(err)?;
     }
     Ok(parsed.as_str().to_string())
+}
+
+/* --------------------------- preview prewarm ---------------------------- */
+
+#[tauri::command]
+pub async fn prewarm_status(state: State<'_, Arc<AppState>>) -> Result<prewarm::Status, String> {
+    Ok(prewarm::snapshot(state.inner()))
+}
+
+#[tauri::command]
+pub async fn start_prewarm(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let st = state.inner().clone();
+    if !prewarm::start(st) {
+        return Err("Previews are already being generated.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_prewarm(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    prewarm::cancel(state.inner());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_prewarm_enabled(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::set_setting(&conn, "prewarm_posters", if enabled { "1" } else { "0" }).map_err(err)
 }
 
 #[derive(Serialize)]

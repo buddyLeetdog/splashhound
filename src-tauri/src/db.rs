@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS videos (
   pix_fmt     TEXT,
   fps         REAL,
   vfr         INTEGER NOT NULL DEFAULT 0,
+  thumb_small BLOB,
   has_audio   INTEGER NOT NULL DEFAULT 0,
   md5         TEXT,
   creator     TEXT,
@@ -218,6 +219,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     ensure_column(&conn, "videos", "pix_fmt", "TEXT")?;
     ensure_column(&conn, "videos", "fps", "REAL")?;
     ensure_column(&conn, "videos", "vfr", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(&conn, "videos", "thumb_small", "BLOB")?;
     Ok(conn)
 }
 
@@ -453,6 +455,32 @@ pub fn get_video(conn: &Connection, id: i64) -> Result<Option<VideoDto>> {
         attach_tags(conn, std::slice::from_mut(v))?;
     }
     Ok(v)
+}
+
+/// Store the tiny placeholder image shown while the real poster loads.
+pub fn set_thumb_small(conn: &Connection, id: i64, bytes: &[u8]) -> Result<()> {
+    conn.execute(
+        "UPDATE videos SET thumb_small = ?2 WHERE id = ?1",
+        params![id, bytes],
+    )?;
+    Ok(())
+}
+
+pub fn thumb_small(conn: &Connection, id: i64) -> Option<Vec<u8>> {
+    conn.query_row(
+        "SELECT thumb_small FROM videos WHERE id = ?1",
+        params![id],
+        |r| r.get::<_, Option<Vec<u8>>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// Videos that already have a placeholder image.
+pub fn lowres_ids(conn: &Connection) -> Result<std::collections::HashSet<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM videos WHERE thumb_small IS NOT NULL")?;
+    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+    Ok(rows.collect::<rusqlite::Result<std::collections::HashSet<i64>>>()?)
 }
 
 /// Videos that need conversion before they play well: either a codec the

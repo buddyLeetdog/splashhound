@@ -4,6 +4,7 @@ pub mod convert;
 pub mod db;
 pub mod dna;
 pub mod media;
+pub mod prewarm;
 pub mod scan;
 pub mod server;
 
@@ -92,6 +93,7 @@ pub struct AppState {
     pub dna: Arc<Mutex<dna::DnaStatus>>,
     pub conversions: Arc<Mutex<HashMap<i64, Conversion>>>,
     pub convert: Arc<Mutex<convert::Status>>,
+    pub prewarm: Arc<Mutex<prewarm::Status>>,
     pub thumb_locks: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>>,
     pub convert_permits: Arc<tokio::sync::Semaphore>,
     pub thumb_permits: Arc<tokio::sync::Semaphore>,
@@ -124,9 +126,12 @@ impl AppState {
             dna: Arc::new(Mutex::new(dna::DnaStatus::default())),
             conversions: Arc::new(Mutex::new(HashMap::new())),
             convert: convert::new_state(),
+            prewarm: prewarm::new_state(),
             thumb_locks: Arc::new(Mutex::new(HashMap::new())),
             convert_permits: Arc::new(tokio::sync::Semaphore::new(1)),
-            thumb_permits: Arc::new(tokio::sync::Semaphore::new(3)),
+            // Two at a time measured fastest for cold posters on a mechanical
+            // disk (12 posters: 74 ms each at 2 workers, 119 ms at 3, 142 ms at 6).
+            thumb_permits: Arc::new(tokio::sync::Semaphore::new(2)),
         };
         state.refresh_ffmpeg();
         state
@@ -296,6 +301,10 @@ pub fn run() {
             commands::convert_status,
             commands::convert_cancel,
             commands::set_convert_quality,
+            commands::prewarm_status,
+            commands::start_prewarm,
+            commands::cancel_prewarm,
+            commands::set_prewarm_enabled,
             commands::ensure_thumbs,
             commands::all_tags,
             commands::all_toys,

@@ -11,7 +11,7 @@ use axum::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 
-use crate::{media, AppState};
+use crate::{db, media, AppState};
 
 /// Local HTTP server used only for media streaming (range requests) and
 /// generated thumbnails. Data flows through Tauri IPC instead.
@@ -21,6 +21,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/media/{id}", get(media_handler))
         .route("/thumb/{id}/{index}", get(thumb_handler))
         .route("/poster/{id}", get(poster_handler))
+        .route("/lowres/{id}", get(lowres_handler))
         .with_state(state)
 }
 
@@ -81,6 +82,32 @@ async fn poster_handler(
     match media::ensure_thumb(&state, &video, index).await {
         Some(path) => image_response(is_head, range, &path).await,
         None => (StatusCode::NOT_FOUND, "no poster").into_response(),
+    }
+}
+
+/// Tiny placeholder stored in the database so grid cards paint immediately.
+async fn lowres_handler(
+    AxState(state): AxState<Arc<AppState>>,
+    AxPath(id): AxPath<i64>,
+) -> Response {
+    let bytes = {
+        let Ok(conn) = state.db.lock() else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
+        };
+        db::thumb_small(&conn, id)
+    };
+    match bytes {
+        Some(bytes) => {
+            let mut res = Response::new(Body::from(bytes));
+            let headers = res.headers_mut();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=604800"),
+            );
+            res
+        }
+        None => (StatusCode::NOT_FOUND, "no placeholder").into_response(),
     }
 }
 

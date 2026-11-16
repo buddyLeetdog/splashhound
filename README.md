@@ -172,6 +172,15 @@ Generated preview frames and converted playback files are cached in
 `~/.cache/com.splashhound.desktop` (`$XDG_CACHE_HOME`) on Linux, and can be
 cleared from Settings.
 
+Every card needs one cached frame (the poster). On a mechanical disk that costs
+~100–140 ms per card, so a page of 60 would stay blank for a while. Two things
+keep scrolling responsive:
+
+- a 40 px **placeholder** of each poster is stored in the database (~1 KB per
+  video) and painted immediately, then swapped for the real frame;
+- after a scan the missing posters are generated in the background
+  (**Settings → Previews**, on by default, also available as a button).
+
 ## Indexing and cache
 
 By default only files whose size collides with another file are hashed — a

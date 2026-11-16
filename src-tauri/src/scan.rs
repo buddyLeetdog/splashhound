@@ -326,6 +326,10 @@ pub async fn run_scan(state: Arc<AppState>) {
                 s.current.clear();
                 s.finished_at = Some(now());
             });
+            // Fill in grid posters in the background so scrolling stays instant.
+            if state.setting("prewarm_posters").as_deref() != Some("0") {
+                crate::prewarm::start(state.clone());
+            }
         }
         Err(e) => fail(&state, format!("{e:#}")),
     }
