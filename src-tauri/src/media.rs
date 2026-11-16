@@ -179,46 +179,85 @@ fn classify(
     }
 }
 
-pub fn detect_ffmpeg(override_dir: Option<&str>) -> Option<Ffmpeg> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(d) = override_dir.filter(|d| !d.trim().is_empty()) {
-        dirs.push(PathBuf::from(d));
+#[cfg(windows)]
+const FFMPEG_BIN: &str = "ffmpeg.exe";
+#[cfg(not(windows))]
+const FFMPEG_BIN: &str = "ffmpeg";
+
+#[cfg(windows)]
+const FFPROBE_BIN: &str = "ffprobe.exe";
+#[cfg(not(windows))]
+const FFPROBE_BIN: &str = "ffprobe";
+
+fn ffmpeg_in(dir: &Path) -> Option<Ffmpeg> {
+    // The setting normally points at a folder, but accept a binary path too.
+    let dir = if dir.is_file() { dir.parent()? } else { dir };
+    let ffmpeg = dir.join(FFMPEG_BIN);
+    let ffprobe = dir.join(FFPROBE_BIN);
+    if ffmpeg.is_file() && ffprobe.is_file() {
+        Some(Ffmpeg { ffmpeg, ffprobe })
+    } else {
+        None
     }
+}
+
+pub fn detect_ffmpeg(override_dir: Option<&str>) -> Option<Ffmpeg> {
+    if let Some(dir) = override_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        if let Some(found) = ffmpeg_in(Path::new(dir)) {
+            return Some(found);
+        }
+    }
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));
     }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let local = PathBuf::from(local);
-        dirs.push(local.join("Microsoft").join("WinGet").join("Links"));
-        let packages = local.join("Microsoft").join("WinGet").join("Packages");
-        if let Ok(entries) = std::fs::read_dir(&packages) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.starts_with("gyan.ffmpeg") {
-                    dirs.push(entry.path().join("bin"));
-                    if let Ok(inner) = std::fs::read_dir(entry.path()) {
-                        for sub in inner.flatten() {
-                            dirs.push(sub.path().join("bin"));
+
+    #[cfg(windows)]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let local = PathBuf::from(local);
+            dirs.push(local.join("Microsoft").join("WinGet").join("Links"));
+            let packages = local.join("Microsoft").join("WinGet").join("Packages");
+            if let Ok(entries) = std::fs::read_dir(&packages) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_lowercase();
+                    if name.starts_with("gyan.ffmpeg") {
+                        dirs.push(entry.path().join("bin"));
+                        if let Ok(inner) = std::fs::read_dir(entry.path()) {
+                            for sub in inner.flatten() {
+                                dirs.push(sub.path().join("bin"));
+                            }
                         }
                     }
                 }
             }
+            dirs.push(local.join("Programs").join("ffmpeg").join("bin"));
         }
-        dirs.push(local.join("Programs").join("ffmpeg").join("bin"));
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            dirs.push(PathBuf::from(pf).join("ffmpeg").join("bin"));
+        }
+        dirs.push(PathBuf::from(r"C:\ffmpeg\bin"));
     }
-    if let Some(pf) = std::env::var_os("ProgramFiles") {
-        dirs.push(PathBuf::from(pf).join("ffmpeg").join("bin"));
-    }
-    dirs.push(PathBuf::from(r"C:\ffmpeg\bin"));
 
-    for dir in dirs {
-        let ffmpeg = dir.join("ffmpeg.exe");
-        let ffprobe = dir.join("ffprobe.exe");
-        if ffmpeg.is_file() && ffprobe.is_file() {
-            return Some(Ffmpeg { ffmpeg, ffprobe });
+    // GUI-launched apps do not always inherit the shell's PATH, so check the
+    // usual install locations as well.
+    #[cfg(not(windows))]
+    {
+        for dir in ["/usr/local/bin", "/usr/bin", "/bin", "/snap/bin"] {
+            dirs.push(PathBuf::from(dir));
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join(".local").join("bin"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            dirs.push(PathBuf::from("/opt/homebrew/bin"));
+            dirs.push(PathBuf::from("/opt/local/bin"));
         }
     }
-    None
+
+    dirs.into_iter().find_map(|dir| ffmpeg_in(&dir))
 }
 
 pub async fn probe(ffprobe: &Path, file: &Path) -> Result<ProbeInfo> {
@@ -1060,6 +1099,26 @@ mod tests {
         assert_eq!(parse_frame_rate(Some("1/0")), None);
         assert_eq!(parse_frame_rate(Some("90000/1")), None);
         assert_eq!(parse_frame_rate(None), None);
+    }
+
+    #[test]
+    fn ffmpeg_is_found_in_an_explicit_folder() {
+        let dir = std::env::temp_dir().join(format!("splashhound-ffmpeg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(FFMPEG_BIN), b"").unwrap();
+        std::fs::write(dir.join(FFPROBE_BIN), b"").unwrap();
+
+        let found = detect_ffmpeg(Some(dir.to_str().unwrap())).expect("ffmpeg should be found");
+        assert_eq!(found.ffmpeg, dir.join(FFMPEG_BIN));
+        assert_eq!(found.ffprobe, dir.join(FFPROBE_BIN));
+
+        // Pointing at the binary itself works as well.
+        let found =
+            detect_ffmpeg(Some(found.ffmpeg.to_str().unwrap())).expect("ffmpeg should be found");
+        assert_eq!(found.ffmpeg, dir.join(FFMPEG_BIN));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
