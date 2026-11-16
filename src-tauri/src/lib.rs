@@ -160,6 +160,7 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let cache_dir = app.path().app_cache_dir()?;
+            migrate_legacy_dirs(&data_dir, &cache_dir);
             std::fs::create_dir_all(&data_dir)?;
             std::fs::create_dir_all(&cache_dir)?;
             let db_path = data_dir.join("library.db");
@@ -208,10 +209,61 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+/// One-time move of the library database and generated cache from the app's
+/// previous identifier, so renaming the product does not lose an indexed
+/// collection.
+fn migrate_legacy_dirs(data_dir: &std::path::Path, cache_dir: &std::path::Path) {
+    const LEGACY_IDENTIFIER: &str = "com.inflatool.desktop";
+
+    // Library database (roaming app data).
+    if let Some(parent) = data_dir.parent() {
+        let legacy = parent.join(LEGACY_IDENTIFIER);
+        if legacy.join("library.db").is_file() && !data_dir.join("library.db").exists() {
+            let _ = std::fs::create_dir_all(data_dir);
+            for file in ["library.db", "library.db-wal", "library.db-shm"] {
+                let from = legacy.join(file);
+                if from.is_file() {
+                    let _ = std::fs::rename(&from, data_dir.join(file));
+                }
+            }
+        }
+    }
+
+    // Generated preview/conversion cache (local app data). This folder also
+    // holds the WebView2 profile, so only move our own subfolders.
+    if let Some(parent) = cache_dir.parent() {
+        let legacy = parent.join(LEGACY_IDENTIFIER);
+        for sub in ["thumbs", "play"] {
+            let from = legacy.join(sub);
+            let to = cache_dir.join(sub);
+            if from.is_dir() && !to.exists() {
+                let _ = std::fs::create_dir_all(cache_dir);
+                if std::fs::rename(&from, &to).is_err() {
+                    let _ = copy_dir(&from, &to);
+                }
+            }
+        }
+    }
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 /// Headless indexing pass, used for development verification:
-/// `inflatool.exe --scan <folder>`
+/// `splashhound.exe --scan <folder>`
 pub fn headless_scan(dir: PathBuf, serve: bool) {
-    let base = std::env::temp_dir().join("inflatool-headless");
+    let base = std::env::temp_dir().join("splashhound-headless");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
     let db_path = base.join("library.db");

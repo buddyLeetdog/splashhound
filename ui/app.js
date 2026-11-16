@@ -1,7 +1,7 @@
 'use strict';
 
 /* ---------------------------------------------------------------------------
- * InflaTool frontend — plain JS against the Tauri command bridge.
+ * Splashhound frontend — plain JS against the Tauri command bridge.
  * ------------------------------------------------------------------------- */
 
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
@@ -197,7 +197,7 @@ async function init() {
     if (state.scan?.running) startScanPolling();
     navigate('library');
   } catch (err) {
-    $('#view').innerHTML = `<div class="fatal">InflaTool failed to start.\n\n${esc(String(err))}</div>`;
+    $('#view').innerHTML = `<div class="fatal">Splashhound failed to start.\n\n${esc(String(err))}</div>`;
   }
 }
 
@@ -1203,7 +1203,7 @@ function viewSettings() {
 
       <section class="panel">
         <h2>About</h2>
-        <div class="kv">InflaTool ${esc(b.version || '')}</div>
+        <div class="kv">Splashhound ${esc(b.version || '')}</div>
         <div class="kv">Local-only app. No network access beyond 127.0.0.1 media streaming.</div>
         <div class="kv">Media cache is served on <code>${esc(b.mediaBase || '')}</code></div>
       </section>

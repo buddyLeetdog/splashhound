@@ -2,7 +2,7 @@ import sqlite3
 import os
 import sys
 
-db = os.path.join(os.environ["APPDATA"], "com.inflatool.desktop", "library.db")
+db = os.path.join(os.environ["APPDATA"], "com.splashhound.desktop", "library.db")
 root = r"D:\InflaTool\example videos"
 conn = sqlite3.connect(db)
 conn.execute(

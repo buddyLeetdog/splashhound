@@ -1,4 +1,4 @@
-"""Drive the running InflaTool WebView2 through the Chrome DevTools Protocol.
+"""Drive the running Splashhound WebView2 through the Chrome DevTools Protocol.
 
 Usage: python tools/ui_probe.py <step> ...
 Steps are executed in order, e.g.:

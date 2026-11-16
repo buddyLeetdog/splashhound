@@ -5,9 +5,9 @@ fn main() {
     if let Some(pos) = args.iter().position(|a| a == "--scan") {
         if let Some(dir) = args.get(pos + 1) {
             let serve = args.iter().any(|a| a == "--serve");
-            inflatool::headless_scan(std::path::PathBuf::from(dir), serve);
+            splashhound::headless_scan(std::path::PathBuf::from(dir), serve);
             return;
         }
     }
-    inflatool::run();
+    splashhound::run();
 }

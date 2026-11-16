@@ -1620,24 +1620,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inflatool"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "md-5",
- "rfd",
- "rusqlite",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
- "tokio-util",
- "walkdir",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3262,6 +3244,24 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "splashhound"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "md-5",
+ "rfd",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+ "tokio-util",
+ "walkdir",
 ]
 
 [[package]]

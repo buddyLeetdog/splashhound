@@ -1,7 +1,7 @@
 [package]
-name = "inflatool"
+name = "splashhound"
 version = "0.1.0"
-description = "Video library categorizer and viewer"
+description = "Splashhound - video library categorizer and viewer"
 edition = "2021"
 rust-version = "1.77"
 

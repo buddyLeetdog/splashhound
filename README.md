@@ -1,4 +1,4 @@
-# InflaTool
+# Splashhound
 
 A local-first desktop tool for indexing, categorizing and browsing a video
 collection. Built with Rust + Tauri 2, SQLite for the library, and a plain
@@ -31,7 +31,7 @@ or build a binary:
 
 ```powershell
 cargo build --release --manifest-path src-tauri/Cargo.toml
-# -> src-tauri/target/release/inflatool.exe
+# -> src-tauri/target/release/splashhound.exe
 ```
 
 To create an installer, install the Tauri CLI once and bundle:
@@ -89,7 +89,7 @@ paths, cache size and cleanup, library statistics.
 
 ## Index
 
-SQLite database in `%APPDATA%\com.inflatool.desktop\library.db`.
+SQLite database in `%APPDATA%\com.splashhound.desktop\library.db`.
 
 `videos` columns: file name, path, size, modification time, duration, width,
 height, video/audio codec, has-audio, MD5, creator, NSFW, popping, destruction,
@@ -100,7 +100,7 @@ Tags live in a separate `tags` table with a `video_tags` join table, so the
 "other tags" field is a proper many-to-many tag set.
 
 Generated preview frames and converted playback files are cached in
-`%LOCALAPPDATA%\com.inflatool.desktop` and can be cleared from Settings.
+`%LOCALAPPDATA%\com.splashhound.desktop` and can be cleared from Settings.
 
 ## Playback
 
@@ -131,8 +131,8 @@ tools/
 Headless indexing (also used for manual verification):
 
 ```powershell
-inflatool.exe --scan "D:\path\to\videos"
-inflatool.exe --scan "D:\path\to\videos" --serve   # keep the media server up
+splashhound.exe --scan "D:\path\to\videos"
+splashhound.exe --scan "D:\path\to\videos" --serve   # keep the media server up
 ```
 
 Debug builds accept remote debugging through WebView2:
