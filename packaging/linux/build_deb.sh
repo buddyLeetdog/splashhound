@@ -3,7 +3,7 @@
 # Usage: packaging/linux/build_deb.sh [version]
 set -euo pipefail
 
-VERSION="${1:-1.0.0}"
+VERSION="${1:-1.2.0}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="$ROOT/src-tauri/target/release/splashhound"
 STAGE="$ROOT/dist/deb-root"
