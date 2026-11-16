@@ -1430,10 +1430,219 @@ function createEditor(root, prefix, video) {
   };
 }
 
+/* --------------------------- stream player ------------------------------ */
+
+/**
+ * Built-in player for files the webview cannot decode (and for VFR files).
+ * ffmpeg decodes and re-encodes to a fragmented MP4 which is appended to a
+ * MediaSource, so codec coverage is ffmpeg's, the frame rate is constant, and
+ * audio stays in sync.
+ */
+let streamPlayer = null;
+
+function stopStreamPlayer() {
+  if (streamPlayer) {
+    streamPlayer.stop();
+    streamPlayer = null;
+  }
+}
+
+function playStream(videoEl, overlay, video, mime, startSec = 0) {
+  stopStreamPlayer();
+  const token = state.playerToken;
+  const start = Math.max(0, startSec || 0);
+  const duration = Math.max(0, (video.durationMs || 0) / 1000);
+  const base = start;
+  const wsUrl = state.media.replace(/^http/, 'ws') + `/stream/${video.id}?t=${start.toFixed(2)}`;
+
+  videoEl.pause();
+  videoEl.removeAttribute('src');
+  videoEl.load();
+
+  const ms = new MediaSource();
+  const objectUrl = URL.createObjectURL(ms);
+  videoEl.src = objectUrl;
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = '<div class="spinner"></div><div>Starting player...</div>';
+
+  let ws = null;
+  let source = null;
+  let stopped = false;
+  let started = false;
+  const queue = [];
+
+  const fail = (message) => {
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `<div class="player-error">${esc(message)}</div>`;
+  };
+
+  const pump = () => {
+    if (!source || source.updating || !queue.length) return;
+    const chunk = queue.shift();
+    try {
+      source.appendBuffer(chunk);
+    } catch (err) {
+      // Not enough buffer space yet: retry after the next updateend.
+      queue.unshift(chunk);
+    }
+  };
+
+  ms.addEventListener('sourceopen', () => {
+    try {
+      source = ms.addSourceBuffer(mime);
+    } catch (err) {
+      fail(`This player cannot use ${mime}: ${err}`);
+      return;
+    }
+    source.addEventListener('updateend', () => {
+      if (!started && videoEl.buffered.length) {
+        started = true;
+        const begin = videoEl.buffered.start(0);
+        if (begin > 0.2) videoEl.currentTime = begin;
+        videoEl.play().catch(() => {});
+        overlay.classList.add('hidden');
+      }
+      pump();
+    });
+
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (event) => {
+      if (stopped || token !== state.playerToken) return;
+      if (typeof event.data === 'string') {
+        fail(event.data);
+        return;
+      }
+      queue.push(new Uint8Array(event.data));
+      pump();
+    };
+    ws.onclose = () => {
+      if (stopped || token !== state.playerToken) return;
+      if (videoEl.readyState >= 2) {
+        overlay.classList.remove('hidden');
+        overlay.innerHTML = '<div class="muted">Playback finished</div>';
+      } else {
+        fail('The decoder stopped before producing video.');
+      }
+    };
+    ws.onerror = () => {
+      if (!stopped) fail('Could not connect to the built-in player.');
+    };
+  });
+
+  // Seeking outside the buffered range starts a new decoder at that position.
+  // The native controls cannot express that (MediaSource clamps seeks to the
+  // buffered ranges), so the stream player draws its own bar.
+  const wrap = videoEl.closest('.player-wrap');
+  let controls = null;
+  let rangeEl = null;
+  let nowEl = null;
+  let playing = false;
+
+  const fmt = (s) => {
+    const total = Math.max(0, Math.floor(s || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const sec = total % 60;
+    return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+             : `${m}:${String(sec).padStart(2, '0')}`;
+  };
+
+  const paint = () => {
+    if (!rangeEl) return;
+    // Each decoder run starts its own timeline at zero, so the file position is
+    // the offset this run was started at plus the element's clock.
+    const pos = base + (videoEl.currentTime || 0);
+    rangeEl.value = String(duration ? Math.round((pos / duration) * 1000) : 0);
+    if (nowEl) nowEl.textContent = fmt(pos);
+  };
+
+  if (wrap) {
+    videoEl.controls = false;
+    controls = document.createElement('div');
+    controls.className = 'stream-controls';
+    controls.innerHTML = `
+      <button class="sc-play" title="Play / pause">\u23f8</button>
+      <span class="sc-now">0:00</span>
+      <input class="sc-range" type="range" min="0" max="1000" value="0" step="1">
+      <span class="sc-total">${fmt(duration)}</span>
+      <span class="sc-badge" title="Decoded by the built-in player">stream</span>`;
+    wrap.appendChild(controls);
+    rangeEl = $('.sc-range', controls);
+    nowEl = $('.sc-now', controls);
+    const playBtn = $('.sc-play', controls);
+    playBtn.onclick = () => {
+      if (videoEl.paused) { videoEl.play().catch(() => {}); } else { videoEl.pause(); }
+    };
+    const setButton = () => {
+      playing = !videoEl.paused;
+      playBtn.textContent = playing ? '\u23f8' : '\u25b6';
+    };
+    videoEl.addEventListener('play', setButton);
+    videoEl.addEventListener('pause', setButton);
+    videoEl.addEventListener('timeupdate', paint);
+    // Drag: preview the position; release: reconnect there.
+    rangeEl.addEventListener('input', () => {
+      if (nowEl && duration) nowEl.textContent = fmt((Number(rangeEl.value) / 1000) * duration);
+    });
+    rangeEl.addEventListener('change', () => {
+      if (!duration) return;
+      const target = (Number(rangeEl.value) / 1000) * duration;
+      stopStreamPlayer();
+      playStream(videoEl, overlay, video, mime, target);
+    });
+    setButton();
+    paint();
+  }
+
+  const onSeeking = () => {
+    if (stopped || !videoEl.buffered.length) return;
+    const t = videoEl.currentTime;
+    const ranges = videoEl.buffered;
+    let inside = false;
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (t >= ranges.start(i) + 0.5 && t <= ranges.end(i) - 0.2) { inside = true; break; }
+    }
+    if (!inside) {
+      stopStreamPlayer();
+      playStream(videoEl, overlay, video, mime, t);
+    }
+  };
+  videoEl.addEventListener('seeking', onSeeking);
+
+  streamPlayer = {
+    seek(seconds) {
+      const target = Math.max(0, Math.min(seconds, duration || seconds));
+      stopStreamPlayer();
+      playStream(videoEl, overlay, video, mime, target);
+    },
+    position() {
+      return base + (videoEl.currentTime || 0);
+    },
+    toggle() {
+      if (videoEl.paused) videoEl.play().catch(() => {}); else videoEl.pause();
+    },
+    stop() {
+      stopped = true;
+      videoEl.removeEventListener('seeking', onSeeking);
+      if (controls) controls.remove();
+      videoEl.controls = true;
+      if (ws) { try { ws.close(); } catch {} }
+      URL.revokeObjectURL(objectUrl);
+      videoEl.pause();
+      videoEl.removeAttribute('src');
+      videoEl.load();
+    },
+  };
+
+  invoke('mark_viewed', { id: video.id }).catch(() => {});
+}
+
 /* ------------------------------ player ---------------------------------- */
 
 function playVideo(videoEl, overlay, video, onReady) {
   const token = ++state.playerToken;
+  stopStreamPlayer();
   state.rate.video = video;
   videoEl.pause();
   videoEl.removeAttribute('src');
@@ -1456,6 +1665,11 @@ function playVideo(videoEl, overlay, video, onReady) {
         info = await invoke('playback_status', { id: video.id });
       }
       if (token !== state.playerToken) return;
+      if (info.mode === 'stream') {
+        playStream(videoEl, overlay, video, info.streamMime, 0);
+        if (onReady) onReady();
+        return;
+      }
       if (info.state !== 'ready' || !info.url) {
         overlay.classList.remove('hidden');
         overlay.innerHTML = `<div class="player-error">${esc(info.error || 'Playback failed.')}</div>`;
@@ -1491,8 +1705,13 @@ async function loadThumbs(video, container, videoEl) {
       </button>`).join('');
     $$('.thumb', container).forEach((btn) => {
       btn.onclick = () => {
+        const t = Number(btn.dataset.t);
+        if (streamPlayer) {
+          streamPlayer.seek(t);
+          return;
+        }
         if (!videoEl) return;
-        videoEl.currentTime = Number(btn.dataset.t);
+        videoEl.currentTime = t;
         videoEl.play().catch(() => {});
       };
     });
@@ -1573,6 +1792,7 @@ async function openDetail(id, options = {}) {
     </div>`, {
     className: 'wide',
     onClose() {
+      stopStreamPlayer();
       state.detail = null;
       state.playerToken += 1;
     },
@@ -1708,6 +1928,7 @@ async function viewRate() {
 }
 
 function stopRatePlayer() {
+  stopStreamPlayer();
   const videoEl = $('#r-video');
   if (videoEl) {
     videoEl.pause();
@@ -2996,6 +3217,20 @@ function viewSettings() {
       </section>
 
       <section class="panel">
+        <h2>Playback</h2>
+        <label class="check" style="margin:0 0 8px">
+          <input type="checkbox" id="set-native-player" ${b.nativePlayer ? 'checked' : ''}>
+          Use the built-in player for unsupported codecs and variable frame rate videos
+        </label>
+        <p class="muted small" style="margin:0">
+          Those files are decoded by ffmpeg and streamed into the player at a constant frame
+          rate, so nothing has to be converted first and audio stays in sync. It costs roughly
+          half a CPU core while playing a 1080p file. Turn this off to go back to converting
+          files into the cache.
+        </p>
+      </section>
+
+      <section class="panel">
         <h2>Previews</h2>
         <p class="muted small" style="margin-top:0">
           Each library card needs one cached frame. On a slow disk that costs ~100 ms per card, so
@@ -3199,6 +3434,14 @@ function viewSettings() {
       if (st.running) setTimeout(refreshPrewarm, 1000);
     } catch (err) {
       /* ignore */
+    }
+  };
+  $('#set-native-player').onchange = async (e) => {
+    try {
+      await invoke('set_native_player', { enabled: e.target.checked });
+      state.boot.nativePlayer = e.target.checked;
+    } catch (err) {
+      toast(String(err), 'error');
     }
   };
   $('#set-prewarm').onchange = async (e) => {
@@ -3563,6 +3806,10 @@ document.addEventListener('keydown', (e) => {
     e.stopPropagation();
     const step = e.ctrlKey ? 60 : 10;
     const direction = e.key === 'ArrowRight' ? 1 : -1;
+    if (streamPlayer) {
+      streamPlayer.seek(streamPlayer.position() + direction * step);
+      return;
+    }
     const duration = Number.isFinite(activeVideo.duration) ? activeVideo.duration : 0;
     let next = activeVideo.currentTime + direction * step;
     next = Math.max(0, next);

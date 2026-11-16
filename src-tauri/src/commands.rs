@@ -5,7 +5,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::{config, convert, db, dna, media, prewarm, scan, AppState, ScanStatus};
+use crate::{config, convert, db, dna, media, prewarm, scan, stream, AppState, ScanStatus};
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -31,6 +31,7 @@ pub struct Bootstrap {
     pub cache_limit_mb: u64,
     pub convert_quality: String,
     pub prewarm_posters: bool,
+    pub native_player: bool,
     pub stats: db::Stats,
     pub tags: Vec<db::TagCount>,
     pub toys: Vec<db::TagCount>,
@@ -94,6 +95,7 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         scan: scan_state,
         convert_quality: media::quality_of(&st).as_str().to_string(),
         prewarm_posters: st.setting("prewarm_posters").as_deref() != Some("0"),
+        native_player: st.setting("native_player").as_deref() != Some("0"),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -471,6 +473,15 @@ pub async fn set_prewarm_enabled(
     db::set_setting(&conn, "prewarm_posters", if enabled { "1" } else { "0" }).map_err(err)
 }
 
+#[tauri::command]
+pub async fn set_native_player(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::set_setting(&conn, "native_player", if enabled { "1" } else { "0" }).map_err(err)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackInfo {
@@ -479,11 +490,28 @@ pub struct PlaybackInfo {
     pub url: Option<String>,
     pub progress: f64,
     pub error: Option<String>,
+    pub stream_mime: Option<String>,
 }
 
 fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> PlaybackInfo {
     let url = format!("{}/media/{}", st.media_base(), video.id);
     let mode = video.playback.clone();
+
+    // The built-in stream player decodes anything ffmpeg can read and writes a
+    // constant frame rate, so it also fixes stuttering VFR files. Checked before
+    // the direct path because VFR files usually have a perfectly valid codec.
+    if (mode == "transcode" || video.vfr) && st.setting("native_player").as_deref() != Some("0") {
+        let (_, codec) = stream::profile_for(video.width, video.height);
+        return PlaybackInfo {
+            mode: "stream".into(),
+            state: "ready".into(),
+            url: None,
+            progress: 1.0,
+            error: None,
+            stream_mime: Some(format!("video/mp4; codecs=\"{codec},mp4a.40.2\"")),
+        };
+    }
+
     if mode == "direct" {
         return PlaybackInfo {
             mode,
@@ -491,6 +519,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: Some(url),
             progress: 1.0,
             error: None,
+            stream_mime: None,
         };
     }
 
@@ -502,6 +531,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: Some(url),
             progress: 1.0,
             error: None,
+            stream_mime: None,
         };
     }
     if st.ffmpeg().is_none() {
@@ -515,6 +545,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
                  Install ffmpeg (winget install Gyan.FFmpeg) and restart the app."
                     .into(),
             ),
+            stream_mime: None,
         };
     }
     if start {
@@ -532,6 +563,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: None,
             progress: 0.0,
             error: job.error,
+            stream_mime: None,
         },
         Some(job) if job.state == "done" && cache.is_file() => PlaybackInfo {
             mode,
@@ -539,6 +571,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: Some(url),
             progress: 1.0,
             error: None,
+            stream_mime: None,
         },
         Some(job) if job.state == "done" => PlaybackInfo {
             mode,
@@ -546,6 +579,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: None,
             progress: -1.0,
             error: None,
+            stream_mime: None,
         },
         Some(job) => PlaybackInfo {
             mode,
@@ -553,6 +587,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: None,
             progress: job.progress,
             error: None,
+            stream_mime: None,
         },
         None => PlaybackInfo {
             mode,
@@ -560,6 +595,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: None,
             progress: -1.0,
             error: None,
+            stream_mime: None,
         },
     }
 }

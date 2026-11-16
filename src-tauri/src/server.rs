@@ -11,7 +11,7 @@ use axum::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 
-use crate::{db, media, AppState};
+use crate::{db, media, stream, AppState};
 
 /// Local HTTP server used only for media streaming (range requests) and
 /// generated thumbnails. Data flows through Tauri IPC instead.
@@ -22,6 +22,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/thumb/{id}/{index}", get(thumb_handler))
         .route("/poster/{id}", get(poster_handler))
         .route("/lowres/{id}", get(lowres_handler))
+        .route("/stream/{id}", get(stream::upgrade))
         .with_state(state)
 }
 

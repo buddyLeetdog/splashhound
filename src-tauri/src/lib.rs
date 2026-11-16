@@ -7,6 +7,7 @@ pub mod media;
 pub mod prewarm;
 pub mod scan;
 pub mod server;
+pub mod stream;
 
 use std::{
     collections::HashMap,
@@ -305,6 +306,7 @@ pub fn run() {
             commands::start_prewarm,
             commands::cancel_prewarm,
             commands::set_prewarm_enabled,
+            commands::set_native_player,
             commands::ensure_thumbs,
             commands::all_tags,
             commands::all_toys,

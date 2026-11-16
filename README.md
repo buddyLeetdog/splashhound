@@ -255,6 +255,17 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
 The first playback of a non-native file shows conversion progress; afterwards
 it starts immediately.
 
+### Built-in stream player (testing branch)
+
+Files WebView2 cannot decode — and files with a variable frame rate — are played
+by the built-in player instead of being converted: ffmpeg decodes the source and
+streams a constant-frame-rate fragmented MP4 into a `MediaSource` over a
+WebSocket. Nothing is cached, a file starts in about a second, audio stays in
+sync, and VFR files no longer stutter because the output timestamps are uniform.
+The trade-off is CPU: roughly half a core for 1080p, against a one-off
+conversion (and a cached copy) with the default path. Toggle it in
+**Settings → Playback**.
+
 ## Development
 
 ```

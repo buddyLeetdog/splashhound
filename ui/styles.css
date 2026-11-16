@@ -251,6 +251,26 @@ label { color: var(--muted); font-size: 12px; display: block; margin-bottom: 4px
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Controls for the built-in stream player (its seeks restart the decoder, so
+   the native MediaSource controls cannot be used). */
+.stream-controls {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px 6px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.78));
+}
+.stream-controls button {
+  background: none; border: none; color: #fff; font-size: 15px; line-height: 1;
+  cursor: pointer; padding: 2px 4px;
+}
+.stream-controls button:hover { color: var(--accent); }
+.stream-controls .sc-range { flex: 1; accent-color: var(--accent); height: 4px; cursor: pointer; }
+.stream-controls .sc-now,
+.stream-controls .sc-total { font-size: 11px; color: #cfd9e2; font-variant-numeric: tabular-nums; }
+.stream-controls .sc-badge {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--accent); opacity: 0.85;
+}
+
 .progress { height: 6px; background: #1a232c; border-radius: 4px; overflow: hidden; }
 .progress > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #55b8ff); transition: width 0.25s; border-radius: 4px; }
 .progress.slim { width: 220px; height: 4px; }
