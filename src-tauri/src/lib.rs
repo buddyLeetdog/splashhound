@@ -112,6 +112,12 @@ impl AppState {
         root: Option<PathBuf>,
     ) -> Self {
         std::fs::create_dir_all(&cache_dir).ok();
+        {
+            // Placeholder size is part of the stored image; drop old ones when it
+            // changes so they are regenerated at the new size.
+            let version = format!("w{}", media::lowres_width());
+            if let Ok(_) = db::ensure_lowres_version(&conn, &version) {}
+        }
         let state = Self {
             db: Arc::new(Mutex::new(conn)),
             db_path: RwLock::new(db_path),

@@ -186,7 +186,7 @@ label { color: var(--muted); font-size: 12px; display: block; margin-bottom: 4px
 .poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
 /* Tiny placeholder stored in the database: shown blurred until the real poster
    arrives, then swapped without a layout shift. */
-.poster img:not(.sharp) { filter: blur(4px); transform: scale(1.04); }
+.poster img:not(.sharp) { filter: blur(2px); transform: scale(1.02); }
 .poster img { transition: filter 0.15s ease; }
 .poster img.broken { display: none; }
 .poster::after {

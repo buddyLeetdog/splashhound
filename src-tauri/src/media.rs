@@ -358,7 +358,12 @@ pub fn thumb_path(state: &AppState, v: &VideoDto, index: usize) -> PathBuf {
 pub const THUMB_COUNT: usize = 12;
 
 /// Width of the placeholder image stored in the database.
-const LOWRES_WIDTH: u32 = 40;
+const LOWRES_WIDTH: u32 = 75;
+
+/// Exposed so the database can drop placeholders generated at another size.
+pub fn lowres_width() -> u32 {
+    LOWRES_WIDTH
+}
 
 pub fn thumb_times(duration_ms: Option<i64>, n: usize) -> Vec<f64> {
     let seconds = duration_ms.filter(|d| *d > 0).unwrap_or(0) as f64 / 1000.0;

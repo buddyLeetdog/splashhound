@@ -459,6 +459,21 @@ pub fn get_video(conn: &Connection, id: i64) -> Result<Option<VideoDto>> {
     Ok(v)
 }
 
+/// Make the placeholders match the current size. Older ones are dropped so they
+/// are regenerated from the cached posters (lazily on view, or by the prewarm
+/// job), which keeps the stored image size in sync with the code.
+pub fn ensure_lowres_version(conn: &Connection, version: &str) -> Result<bool> {
+    if get_setting(conn, "lowres_version").as_deref() == Some(version) {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE videos SET thumb_small = NULL WHERE thumb_small IS NOT NULL",
+        [],
+    )?;
+    set_setting(conn, "lowres_version", version)?;
+    Ok(true)
+}
+
 /// Store the tiny placeholder image shown while the real poster loads.
 pub fn set_thumb_small(conn: &Connection, id: i64, bytes: &[u8]) -> Result<()> {
     conn.execute(
