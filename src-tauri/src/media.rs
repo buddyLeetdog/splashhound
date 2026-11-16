@@ -12,6 +12,20 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 use crate::{db::VideoDto, AppState, Conversion, Ffmpeg};
 
+/// Spawn a process without flashing a console window. The app is built as a
+/// GUI-subsystem binary, so every child process would otherwise get its own
+/// console for a moment (very visible while scanning a large library).
+fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    tokio::process::Command::from(command)
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeInfo {
@@ -86,7 +100,7 @@ pub fn detect_ffmpeg(override_dir: Option<&str>) -> Option<Ffmpeg> {
 }
 
 pub async fn probe(ffprobe: &Path, file: &Path) -> Result<ProbeInfo> {
-    let output = tokio::process::Command::new(ffprobe)
+    let output = quiet_command(ffprobe)
         .args([
             "-v",
             "error",
@@ -203,7 +217,7 @@ pub fn thumb_times(duration_ms: Option<i64>, n: usize) -> Vec<f64> {
 }
 
 async fn try_extract(ffmpeg: &Path, src: &Path, t: f64, out: &Path, seek_first: bool) -> bool {
-    let mut cmd = tokio::process::Command::new(ffmpeg);
+    let mut cmd = quiet_command(ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-y"]);
     if seek_first {
         cmd.arg("-ss").arg(format!("{:.3}", t));
@@ -359,7 +373,7 @@ async fn ffmpeg_convert(
     out: &Path,
     remux: bool,
 ) -> Result<()> {
-    let mut cmd = tokio::process::Command::new(&ffmpeg.ffmpeg);
+    let mut cmd = quiet_command(&ffmpeg.ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-y"]);
     cmd.arg("-i").arg(&v.path);
     cmd.args(["-map", "0:v:0", "-map", "0:a:0?"]);

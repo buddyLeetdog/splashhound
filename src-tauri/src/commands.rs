@@ -386,10 +386,11 @@ pub async fn reveal(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), Stri
     let video = state.inner().video(id).ok_or("Video not found.")?;
     #[cfg(windows)]
     {
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{}", video.path))
-            .spawn()
-            .map_err(err)?;
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("explorer");
+        command.arg(format!("/select,{}", video.path));
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        command.spawn().map_err(err)?;
     }
     Ok(())
 }
