@@ -119,9 +119,14 @@ library statistics.
 
 ## Index
 
-By default the SQLite database lives in
-`%APPDATA%\com.splashhound.desktop\library.db`. **Settings → Storage → Change
-folder…** moves it elsewhere: the database is copied to the new folder, the
+By default the SQLite database lives in the app's data folder:
+
+- Windows — `%APPDATA%\com.splashhound.desktop\library.db`
+- Linux — `~/.local/share/com.splashhound.desktop/library.db`
+  (or `$XDG_DATA_HOME/com.splashhound.desktop/library.db`)
+
+**Settings → Storage → Change folder…** moves it elsewhere: the database is
+copied to the new folder, the
 current file is kept as a backup, and an existing `library.db` at the target is
 renamed aside first. The chosen location is remembered in `config.json` next to
 the default folder, so the app finds it on startup.
@@ -143,7 +148,9 @@ Tags live in a separate `tags` table with a `video_tags` join table, so the
 and filtered independently of general tags.
 
 Generated preview frames and converted playback files are cached in
-`%LOCALAPPDATA%\com.splashhound.desktop` and can be cleared from Settings.
+`%LOCALAPPDATA%\com.splashhound.desktop` on Windows and
+`~/.cache/com.splashhound.desktop` (`$XDG_CACHE_HOME`) on Linux, and can be
+cleared from Settings.
 
 ## Indexing and cache
 
