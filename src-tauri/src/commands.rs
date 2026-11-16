@@ -32,6 +32,7 @@ pub struct Bootstrap {
     pub convert_quality: String,
     pub prewarm_posters: bool,
     pub native_player: bool,
+    pub stream_window: u64,
     pub stats: db::Stats,
     pub tags: Vec<db::TagCount>,
     pub toys: Vec<db::TagCount>,
@@ -96,6 +97,11 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         convert_quality: media::quality_of(&st).as_str().to_string(),
         prewarm_posters: st.setting("prewarm_posters").as_deref() != Some("0"),
         native_player: st.setting("native_player").as_deref() != Some("0"),
+        stream_window: st
+            .setting("stream_window")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(15)
+            .clamp(3, 120),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -487,6 +493,19 @@ pub async fn set_native_player(
 pub async fn stream_encoder(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
     let ffmpeg = state.inner().ffmpeg().ok_or("ffmpeg was not found")?;
     Ok(stream::hardware_encoder(&ffmpeg.ffmpeg).map(str::to_string))
+}
+
+#[tauri::command]
+pub async fn set_stream_window(
+    state: State<'_, Arc<AppState>>,
+    seconds: u64,
+) -> Result<u64, String> {
+    let seconds = seconds.clamp(3, 120);
+    {
+        let conn = state.inner().db.lock().map_err(err)?;
+        db::set_setting(&conn, "stream_window", &seconds.to_string()).map_err(err)?;
+    }
+    Ok(seconds)
 }
 
 #[derive(Serialize)]

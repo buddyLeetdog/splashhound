@@ -1447,7 +1447,35 @@ function stopStreamPlayer() {
   }
 }
 
-function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) {
+/**
+ * Open the stream before the player element exists, so ffmpeg starts while the
+ * detail view is still being rendered. Returns a handle that `playStream` adopts.
+ */
+function openStreamSocket(video, startSec = 0) {
+  const handle = { ws: null, queue: [], receivedBytes: 0, closed: false };
+  try {
+    const url = state.media.replace(/^http/, 'ws') + `/stream/${video.id}?t=${startSec.toFixed(2)}`;
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (event) => {
+      if (typeof event.data === 'string') return;
+      handle.queue.push(new Uint8Array(event.data));
+      handle.receivedBytes += event.data.byteLength;
+    };
+    ws.onerror = () => {
+      handle.closed = true;
+    };
+    ws.onclose = () => {
+      handle.closed = true;
+    };
+    handle.ws = ws;
+  } catch (err) {
+    handle.closed = true;
+  }
+  return handle;
+}
+
+function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, warm = null) {
   stopStreamPlayer();
   const token = state.playerToken;
   const start = Math.max(0, startSec || 0);
@@ -1471,7 +1499,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
   let started = false;
   let creditTimer = null;
   let receivedBytes = 0;
-  const queue = [];
+  let queue = [];
 
   const fail = (message) => {
     if (freeze) freeze.remove();
@@ -1509,8 +1537,51 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
       pump();
     });
 
-    ws = new WebSocket(wsUrl);
-    ws.binaryType = 'arraybuffer';
+    // Adopt the socket that was opened while the dialog was rendering, or open
+    // one now. Either way the same handlers drive it.
+    const adopt = (socket, initialQueue, initialBytes) => {
+      ws = socket;
+      ws.binaryType = 'arraybuffer';
+      if (initialQueue) {
+        queue = initialQueue;
+        receivedBytes = initialBytes || 0;
+      }
+      ws.onmessage = (event) => {
+        if (stopped || token !== state.playerToken) return;
+        if (typeof event.data === 'string') {
+          fail(event.data);
+          return;
+        }
+        queue.push(new Uint8Array(event.data));
+        receivedBytes += event.data.byteLength;
+        pump();
+      };
+      ws.onclose = () => {
+        if (stopped || token !== state.playerToken) return;
+        if (videoEl.readyState >= 2) {
+          if (freeze) freeze.remove();
+          overlay.classList.remove('hidden');
+          overlay.innerHTML = '<div class="muted">Playback finished</div>';
+        } else {
+          fail('The decoder stopped before producing video.');
+        }
+      };
+      ws.onerror = () => {
+        if (!stopped) fail('Could not connect to the built-in player.');
+      };
+    };
+
+    if (warm && !warm.closed && warm.ws && warm.ws.readyState !== WebSocket.CLOSED) {
+      adopt(warm.ws, warm.queue, warm.receivedBytes);
+      warm = null;
+      pump();
+    } else {
+      if (warm) {
+        try { warm.ws.close(); } catch (err) { /* ignore */ }
+        warm = null;
+      }
+      adopt(new WebSocket(wsUrl), null, 0);
+    }
     // Tell the server how far ahead we are, so it can run ahead of realtime and
     // pause when the buffer is full. Seeks inside that buffer need no restart.
     creditTimer = setInterval(() => {
@@ -1530,29 +1601,6 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
         /* ignore */
       }
     }, 300);
-    ws.onmessage = (event) => {
-      if (stopped || token !== state.playerToken) return;
-      if (typeof event.data === 'string') {
-        fail(event.data);
-        return;
-      }
-      queue.push(new Uint8Array(event.data));
-      receivedBytes += event.data.byteLength;
-      pump();
-    };
-    ws.onclose = () => {
-      if (stopped || token !== state.playerToken) return;
-      if (videoEl.readyState >= 2) {
-        if (freeze) freeze.remove();
-        overlay.classList.remove('hidden');
-        overlay.innerHTML = '<div class="muted">Playback finished</div>';
-      } else {
-        fail('The decoder stopped before producing video.');
-      }
-    };
-    ws.onerror = () => {
-      if (!stopped) fail('Could not connect to the built-in player.');
-    };
   });
 
   // Seeking outside the buffered range starts a new decoder at that position.
@@ -1827,9 +1875,20 @@ function playVideo(videoEl, overlay, video, onReady) {
   overlay.innerHTML = '<div class="spinner"></div><div>Preparing...</div>';
 
   (async () => {
+    // Start the decoder immediately if the built-in player is going to be used;
+    // it runs while the dialog renders, so the first frame is ready sooner.
+    const willStream = (video.playback === 'transcode' || video.vfr) && state.boot?.nativePlayer;
+    let warm = willStream ? openStreamSocket(video, 0) : null;
+    const dropWarm = () => {
+      if (warm) {
+        try { warm.ws.close(); } catch (err) { /* ignore */ }
+        warm = null;
+      }
+    };
     try {
       let info = await invoke('prepare_playback', { id: video.id });
       while (token === state.playerToken && (info.state === 'working' || info.state === 'queued')) {
+        dropWarm();
         const pct = info.progress >= 0 ? Math.round(info.progress * 100) : null;
         overlay.innerHTML = `
           <div class="spinner"></div>
@@ -1840,12 +1899,17 @@ function playVideo(videoEl, overlay, video, onReady) {
         if (token !== state.playerToken) return;
         info = await invoke('playback_status', { id: video.id });
       }
-      if (token !== state.playerToken) return;
+      if (token !== state.playerToken) {
+        dropWarm();
+        return;
+      }
       if (info.mode === 'stream') {
-        playStream(videoEl, overlay, video, info.streamMime, 0);
+        playStream(videoEl, overlay, video, info.streamMime, 0, null, warm);
+        warm = null;
         if (onReady) onReady();
         return;
       }
+      dropWarm();
       if (info.state !== 'ready' || !info.url) {
         overlay.classList.remove('hidden');
         overlay.innerHTML = `<div class="player-error">${esc(info.error || 'Playback failed.')}</div>`;
@@ -1857,6 +1921,7 @@ function playVideo(videoEl, overlay, video, onReady) {
       if (onReady) onReady();
       videoEl.play().catch(() => {});
     } catch (err) {
+      dropWarm();
       if (token === state.playerToken) {
         overlay.classList.remove('hidden');
         overlay.innerHTML = `<div class="player-error">${esc(String(err))}</div>`;
@@ -3404,6 +3469,21 @@ function viewSettings() {
           half a CPU core while playing a 1080p file. Turn this off to go back to converting
           files into the cache.
         </p>
+        <div class="row gap" style="margin-top:10px;align-items:center">
+          <label class="small" for="set-stream-window">Buffer ahead</label>
+          <select class="select" id="set-stream-window">
+            <option value="5">5 seconds</option>
+            <option value="15">15 seconds</option>
+            <option value="30">30 seconds</option>
+            <option value="60">60 seconds</option>
+          </select>
+          <span class="muted small" id="stream-window-note"></span>
+        </div>
+        <p class="muted small" style="margin:6px 0 0">
+          Everything inside this window can be seeked without restarting the decoder, so a bigger
+          buffer makes longer jumps instant. It costs memory: about 1 MB per second of video for
+          1080p, i.e. roughly 30 MB at 30 seconds.
+        </p>
       </section>
 
       <section class="panel">
@@ -3620,7 +3700,20 @@ function viewSettings() {
       toast(String(err), 'error');
     }
   };
-  $('#set-prewarm').onchange = async (e) => {
+  const windowSelect = $('#set-stream-window');
+  if (windowSelect) {
+    windowSelect.value = String(state.boot.streamWindow || 15);
+    windowSelect.onchange = async () => {
+      try {
+        const saved = await invoke('set_stream_window', { seconds: Number(windowSelect.value) });
+        state.boot.streamWindow = saved;
+        windowSelect.value = String(saved);
+        toast(`Buffer ahead: ${saved} s`);
+      } catch (err) {
+        toast(String(err), 'error');
+      }
+    };
+  }  $('#set-prewarm').onchange = async (e) => {
     try {
       await invoke('set_prewarm_enabled', { enabled: e.target.checked });
       state.boot.prewarmPosters = e.target.checked;

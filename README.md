@@ -265,12 +265,17 @@ stutter because the output timestamps are uniform.
 
 - **Encoder**: the best hardware encoder the machine can actually use
   (`h264_nvenc`, `h264_qsv`, `h264_amf`, `h264_vaapi` — each is test-encoded once)
-  with `libx264` as fallback. Measured on an RTX 5060 Ti: 0.18 CPU cores steady
-  at 1080p, against 0.61 with software.
-- **Seeking**: the decoder runs up to 15 s ahead of the playhead and the player
-  reports how far ahead it is, so any seek inside that window jumps without
-  restarting the encoder (instant). Bigger jumps restart it at the target while
-  the last frame is held, and settle in roughly 0.3–0.5 s.
+  with `libx264` as fallback. Decoding uses the matching GPU path too
+  (`cuda`, `qsv`, `d3d11va`, `vaapi`) when the source codec supports it, so the
+  frames never leave the GPU. Measured at 1080p: process CPU is ~0.02 cores with
+  CUDA + NVENC.
+- **Seeking**: the decoder runs ahead of the playhead (5–60 s, configurable in
+  Settings → Playback) and the player reports how far ahead it is, so any seek
+  inside that window jumps without restarting the encoder (measured 0 ms).
+  Bigger jumps restart it at the target while the last frame is held and settle
+  in roughly 0.3–0.5 s. Memory cost is about 1 MB per second of buffered video.
+- **Start**: the decoder is started while the detail view is still rendering, so
+  the first frame arrives in ~0.5 s.
 - **Controls**: play/pause, scrub bar, volume/mute, fullscreen (button, `F11` or
   double-click), badges. Hotkeys: `Space`, `M`, `↑`/`↓`,
   `Shift`/`Ctrl`+`←`/`→`, `F11`.

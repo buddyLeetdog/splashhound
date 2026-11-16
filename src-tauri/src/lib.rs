@@ -308,6 +308,7 @@ pub fn run() {
             commands::set_prewarm_enabled,
             commands::set_native_player,
             commands::stream_encoder,
+            commands::set_stream_window,
             commands::ensure_thumbs,
             commands::all_tags,
             commands::all_toys,

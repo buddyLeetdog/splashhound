@@ -22,10 +22,13 @@ use crate::AppState;
 /// actually use (missing GPU, driver or session limit).
 const HW_CANDIDATES: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi"];
 
-/// How far ahead of the playhead the decoder may run. Everything inside this
-/// window can be seeked without restarting the encoder, so 15 s makes most
-/// seeks instant at the cost of a few MB of buffered video.
-const MAX_AHEAD_MS: u64 = 15_000;
+/// How far ahead of the playhead the decoder may run by default. Everything
+/// inside this window can be seeked without restarting the encoder, so it trades
+/// memory for instant seeking. Configurable in Settings.
+const DEFAULT_AHEAD_MS: u64 = 15_000;
+
+/// Cap for the configured window, so a typo cannot buffer minutes of video.
+const MAX_WINDOW_MS: u64 = 120_000;
 
 static HW_ENCODER: OnceLock<Option<&'static str>> = OnceLock::new();
 
@@ -89,9 +92,58 @@ fn encoder_works(ffmpeg: &Path, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// One way of producing the stream: encoder plus optional hardware decoding.
+#[derive(Clone, Copy)]
+struct Attempt {
+    encoder: &'static str,
+    /// (hwaccel name, output format) for GPU decoding of the source.
+    hwaccel: Option<(&'static str, &'static str)>,
+}
+
+/// Codecs that hardware decoders actually handle; everything else is decoded by
+/// ffmpeg on the CPU so a failed attempt does not delay playback.
+fn codec_supports_hwaccel(codec: Option<&str>) -> bool {
+    matches!(
+        codec.map(|c| c.to_ascii_lowercase()).as_deref(),
+        Some("h264") | Some("hevc") | Some("h265") | Some("vp9") | Some("av1") | Some("mpeg2video")
+    )
+}
+
+/// Encoder/decoder combinations to try in order: hardware decode first, then the
+/// same encoder on a CPU-decoded frame, then libx264.
+fn attempts(hardware: Option<&'static str>, codec: Option<&str>) -> Vec<Attempt> {
+    let mut out = Vec::new();
+    if let Some(encoder) = hardware {
+        let hw = match encoder {
+            "h264_nvenc" => Some(("cuda", "cuda")),
+            "h264_qsv" => Some(("qsv", "qsv")),
+            "h264_vaapi" => Some(("vaapi", "vaapi")),
+            "h264_amf" => Some(("d3d11va", "d3d11")),
+            _ => None,
+        };
+        if let Some((accel, format)) = hw {
+            if codec_supports_hwaccel(codec) {
+                out.push(Attempt {
+                    encoder,
+                    hwaccel: Some((accel, format)),
+                });
+            }
+        }
+        out.push(Attempt {
+            encoder,
+            hwaccel: None,
+        });
+    }
+    out.push(Attempt {
+        encoder: "libx264",
+        hwaccel: None,
+    });
+    out
+}
+
 /// Encoder arguments for the chosen codec, matching the codec string the
 /// frontend asked for (high profile, level from the resolution).
-fn encoder_args(name: &str, level: &str, gop: i64) -> Vec<String> {
+fn encoder_args(name: &str, level: &str, gop: i64, software_frames: bool) -> Vec<String> {
     let mut args: Vec<String> = match name {
         "h264_nvenc" => vec![
             "-c:v",
@@ -145,20 +197,18 @@ fn encoder_args(name: &str, level: &str, gop: i64) -> Vec<String> {
     .map(str::to_string)
     .collect();
 
-    // VAAPI uploads frames to the GPU and must not be given a raw pixel format.
+    // VAAPI uploads frames to the GPU and hardware decoding keeps them there;
+    // forcing a raw pixel format in those cases makes ffmpeg stall.
     if name != "h264_vaapi" {
         args.extend(
-            [
-                "-profile:v",
-                "high",
-                "-level:v",
-                level,
-                "-pix_fmt",
-                "yuv420p",
-            ]
-            .into_iter()
-            .map(str::to_string),
+            ["-profile:v", "high", "-level:v", level]
+                .into_iter()
+                .map(str::to_string),
         );
+        if software_frames {
+            args.push("-pix_fmt".into());
+            args.push("yuv420p".into());
+        }
     }
     args.extend(
         [
@@ -225,16 +275,29 @@ fn build_command(
     fps: f64,
     level: &str,
     gop: i64,
-    encoder: &str,
+    attempt: Attempt,
 ) -> tokio::process::Command {
     let mut cmd = quiet_command(ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin"]);
+    // Hardware decoding keeps the source frames on the GPU; the encoder consumes
+    // them directly when both sides agree on the format.
+    if let Some((accel, format)) = attempt.hwaccel {
+        if accel == "vaapi" {
+            cmd.args(["-vaapi_device", "/dev/dri/renderD128"]);
+        }
+        cmd.args(["-hwaccel", accel, "-hwaccel_output_format", format]);
+    }
     if start > 0.5 {
         cmd.arg("-ss").arg(format!("{start:.3}"));
     }
     cmd.arg("-i").arg(path);
     cmd.args(["-map", "0:v:0", "-map", "0:a:0?"]);
-    cmd.args(encoder_args(encoder, level, gop));
+    cmd.args(encoder_args(
+        attempt.encoder,
+        level,
+        gop,
+        attempt.hwaccel.is_none(),
+    ));
     cmd.args([
         // Constant frame rate output fixes variable-rate sources.
         "-fps_mode",
@@ -313,24 +376,28 @@ async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebS
     let gop = fps.round().clamp(1.0, 60.0) as i64;
 
     let hardware = hardware_encoder(&ffmpeg.ffmpeg);
-    let mut encoders: Vec<&str> = Vec::new();
-    if let Some(hw) = hardware {
-        encoders.push(hw);
-    }
-    encoders.push("libx264");
+    let window_ms = state
+        .setting("stream_window")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|seconds| (seconds.saturating_mul(1000)).clamp(3_000, MAX_WINDOW_MS))
+        .unwrap_or(DEFAULT_AHEAD_MS);
 
     let mut sent = 0usize;
     let mut errors: Vec<String> = Vec::new();
     let mut child = None;
 
-    for encoder in encoders {
+    for attempt in attempts(hardware, video.vcodec.as_deref()) {
+        let label = match attempt.hwaccel {
+            Some((accel, _)) => format!("{}+{}", attempt.encoder, accel),
+            None => attempt.encoder.to_string(),
+        };
         let mut spawned =
-            match build_command(&ffmpeg.ffmpeg, &video.path, start, fps, level, gop, encoder)
+            match build_command(&ffmpeg.ffmpeg, &video.path, start, fps, level, gop, attempt)
                 .spawn()
             {
                 Ok(child) => child,
                 Err(err) => {
-                    errors.push(format!("{encoder}: {err}"));
+                    errors.push(format!("{label}: {err}"));
                     continue;
                 }
             };
@@ -338,16 +405,18 @@ async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebS
         let mut stdout = spawned.stdout.take().unwrap();
         let guard = Decoder(spawned);
 
-        // Hand the socket to the first encoder that produces data; if it dies
-        // early, fall back to the next one (hardware -> software).
+        // Hand the socket to the first attempt that produces data; if it dies
+        // early, fall back to the next one (hardware decode -> CPU decode ->
+        // software encoder).
         match stream_with(
             &mut sink,
             &mut closed,
             &mut stdout,
             &mut stderr,
-            encoder,
+            &label,
             &ahead,
             &last_report,
+            window_ms,
         )
         .await
         {
@@ -364,7 +433,7 @@ async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebS
                     child = Some(guard);
                     break;
                 }
-                errors.push(format!("{encoder}: {reason}"));
+                errors.push(reason);
             }
         }
     }
@@ -392,6 +461,7 @@ async fn stream_with(
     encoder: &str,
     ahead: &std::sync::atomic::AtomicU64,
     last_report: &std::sync::atomic::AtomicU64,
+    window_ms: u64,
 ) -> Result<usize, (String, usize)> {
     let mut buf = vec![0u8; 64 * 1024];
     let mut sent = 0usize;
@@ -399,7 +469,7 @@ async fn stream_with(
         let ahead_ms = ahead.load(std::sync::atomic::Ordering::Relaxed);
         // Stop reading from ffmpeg once the client is far enough ahead; the
         // pipe backpressure pauses the encoder without killing it.
-        if ahead_ms > MAX_AHEAD_MS {
+        if ahead_ms > window_ms {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(80)) => continue,
                 _ = &mut *closed => return Ok(sent),
@@ -470,10 +540,10 @@ mod tests {
 
     #[test]
     fn software_encoder_is_the_fallback() {
-        let args = encoder_args("libx264", "4.1", 30);
+        let args = encoder_args("libx264", "4.1", 30, true);
         assert!(args.contains(&"libx264".to_string()));
         assert!(args.contains(&"ultrafast".to_string()));
-        let hw = encoder_args("h264_nvenc", "4.1", 30);
+        let hw = encoder_args("h264_nvenc", "4.1", 30, false);
         assert!(hw.contains(&"h264_nvenc".to_string()));
         assert!(hw.contains(&"4.1".to_string()));
     }
