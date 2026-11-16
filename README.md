@@ -123,10 +123,16 @@ src-tauri/src/
   server.rs         localhost media server (range requests, thumbs)
   commands.rs       Tauri IPC commands
 tools/
-  make_icons.py     regenerate app icons
+  make_icons.py     regenerate app icons from the chosen design
+  icon_proposals.py icon concept sketches (dog + swim ring, 5 palettes)
   ui_probe.py       drive the running app over the WebView2 devtools protocol
   seed_dev_db.py    point the dev database at a folder without clicking
 ```
+
+Regenerating icons: `python tools/make_icons.py` writes every size plus
+`icon.ico`. Because the icons are embedded by the Tauri codegen, a plain
+`cargo build` may not pick them up — run `cargo clean -p splashhound` (or
+`cargo clean --release -p splashhound`) and rebuild.
 
 Headless indexing (also used for manual verification):
 

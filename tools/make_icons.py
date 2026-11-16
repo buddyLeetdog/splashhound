@@ -1,89 +1,64 @@
-"""Generate app icons (PNG + ICO) without external dependencies."""
+"""Generate the Splashhound app icon (PNG sizes + Windows .ico).
+
+The design comes from icon_proposals.propose_b ("night pool"). Render at
+1024px and downsample for each target size.
+"""
+
 import os
-import struct
-import zlib
-import math
+import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-def png_bytes(width, height, rgba_rows):
-    raw = b"".join(b"\x00" + row for row in rgba_rows)
+import icon_proposals as ic
+from PIL import Image
 
-    def chunk(tag, data):
-        c = tag + data
-        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
-
-    sig = b"\x89PNG\r\n\x1a\n"
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
-
-
-def render(size):
-    rows = []
-    cx = cy = size / 2.0
-    for y in range(size):
-        row = bytearray()
-        for x in range(size):
-            # normalised coords in [-1, 1]
-            nx = (x + 0.5 - cx) / (size / 2.0)
-            ny = (y + 0.5 - cy) / (size / 2.0)
-            r = math.sqrt(nx * nx + ny * ny)
-            # rounded-square mask
-            m = max(abs(nx), abs(ny))
-            alpha = 0
-            if m <= 1.0:
-                # smooth rounded corners
-                if m > 0.86 and r > 0.98:
-                    alpha = int(255 * max(0.0, min(1.0, (1.04 - r) / 0.08)))
-                else:
-                    alpha = 255
-            # background gradient
-            t = (ny + 1) / 2
-            br = int(18 + 22 * t)
-            bg = int(22 + 40 * t)
-            bb = int(30 + 60 * t)
-            # play triangle
-            tri = False
-            if 0.12 < ny < 0.88 and -0.55 < nx < 0.62:
-                left = -0.42 + 0.20 * (1 - (ny + 1) / 2) * 0
-                width_at = (0.88 - abs(ny)) / 0.88
-                if nx > -0.30 and nx < -0.30 + 0.92 * width_at:
-                    tri = True
-            # ring accent
-            ring = 0.30 < r < 0.38
-            if tri:
-                cr, cg, cb = 235, 245, 240
-            elif ring:
-                cr, cg, cb = 66, 200, 160
-            else:
-                cr, cg, cb = br, bg, bb
-            row += bytes((cr, cg, cb, alpha))
-        rows.append(bytes(row))
-    return png_bytes(size, size, rows)
-
-
-def ico(png256):
-    header = struct.pack("<HHH", 0, 1, 1)
-    entry = struct.pack("<BBBBHHII", 0, 0, 0, 0, 1, 32, len(png256), 22)
-    return header + entry + png256
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ICONS = os.path.join(ROOT, "src-tauri", "icons")
+PROPOSALS = os.path.join(ROOT, "tools", "proposals")
 
 
 def main():
-    out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src-tauri", "icons")
-    os.makedirs(out, exist_ok=True)
-    pngs = {}
-    for size in (32, 128, 256, 512):
-        pngs[size] = render(size)
-    with open(os.path.join(out, "32x32.png"), "wb") as f:
-        f.write(pngs[32])
-    with open(os.path.join(out, "128x128.png"), "wb") as f:
-        f.write(pngs[128])
-    with open(os.path.join(out, "128x128@2x.png"), "wb") as f:
-        f.write(pngs[256])
-    with open(os.path.join(out, "icon.png"), "wb") as f:
-        f.write(pngs[512])
-    with open(os.path.join(out, "icon.ico"), "wb") as f:
-        f.write(ico(pngs[256]))
-    print("icons written to", out)
+    os.makedirs(ICONS, exist_ok=True)
+    os.makedirs(PROPOSALS, exist_ok=True)
+
+    # Same 2048px supersampled canvas as the proposals, larger output.
+    ic.SIZE = 1024
+    ic.SS = 2
+    ic.S = ic.SIZE * ic.SS
+
+    master = ic.propose_b()
+    master.save(os.path.join(PROPOSALS, "b_night_master.png"))
+
+    targets = {
+        "icon.png": 512,
+        "128x128@2x.png": 256,
+        "128x128.png": 128,
+        "64x64.png": 64,
+        "48x48.png": 48,
+        "32x32.png": 32,
+        "24x24.png": 24,
+        "16x16.png": 16,
+        "Square150x150Logo.png": 150,
+        "Square44x44Logo.png": 44,
+        "StoreLogo.png": 50,
+    }
+    for name, size in targets.items():
+        master.resize((size, size), Image.LANCZOS).save(os.path.join(ICONS, name))
+
+    master.save(
+        os.path.join(ICONS, "icon.ico"),
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+
+    # small-size sanity strip
+    strip = Image.new("RGBA", (16 + 256 + 128 + 64 + 48 + 32 + 24 + 16 + 8 * 8, 128), (12, 16, 21, 255))
+    x = 8
+    for s in (16, 24, 32, 48, 64, 128, 256):
+        strip.alpha_composite(master.resize((s, s), Image.LANCZOS), (x, 64 - s // 2))
+        x += s + 8
+    strip.save(os.path.join(PROPOSALS, "icon_sizes.png"))
+
+    print("icons written to", ICONS)
 
 
 if __name__ == "__main__":

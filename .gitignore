@@ -1,4 +1,4 @@
-# Build output
+﻿# Build output
 /src-tauri/target/
 /src-tauri/gen/
 
@@ -13,4 +13,6 @@ desktop.ini
 .vscode/
 *.log
 /tools/*.png
+/tools/proposals/
 __pycache__/
+
