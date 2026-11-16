@@ -421,7 +421,7 @@ pub fn headless_scan(dir: PathBuf, serve: bool) {
     println!("videos: {}", total);
     for v in &items {
         println!(
-            "  #{} {} | {:.1}s | {}x{} | {} / {} | md5={:?} | {} | play={}",
+            "  #{} {} | {:.1}s | {}x{} | {} / {} / {} | md5={:?} | {} | play={}",
             v.id,
             v.file_name,
             v.duration_ms.unwrap_or(0) as f64 / 1000.0,
@@ -429,6 +429,7 @@ pub fn headless_scan(dir: PathBuf, serve: bool) {
             v.height.unwrap_or(0),
             v.vcodec.as_deref().unwrap_or("?"),
             v.acodec.as_deref().unwrap_or("-"),
+            v.pix_fmt.as_deref().unwrap_or("-"),
             v.md5,
             v.size,
             v.playback

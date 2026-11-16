@@ -203,9 +203,15 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
 
 ## Playback
 
-- MP4/MOV/WebM with H.264/VP8/VP9/AV1 play directly.
-- MKV/FLV/TS with H.264 are remuxed to a cached MP4 (fast, no quality loss).
-- WMV/AVI/MPEG-2/etc. are transcoded to H.264/AAC once and cached.
+- MP4/MOV/WebM with H.264, VP8, VP9 or AV1 play directly.
+- Any other container that holds a decodable video stream — MKV, TS/M2TS, FLV,
+  AVI, MPG — is remuxed to a cached MP4. The video is copied bit for bit; the
+  audio is copied as well when MP4 can hold it (AAC, MP3) and re-encoded to AAC
+  only when it cannot (AC3, DTS, PCM, …).
+- WMV/VC-1, MPEG-1, MPEG-2, MPEG-4 ASP (Xvid/DivX), Sorenson FLV, Indeo and
+  MJPEG are transcoded to H.264/AAC once and cached.
+- H.264 must be 8-bit 4:2:0. Hi10P and 4:2:2 files are transcoded because
+  WebView2 cannot decode them.
 
 The first playback of a non-native file shows conversion progress; afterwards
 it starts immediately.

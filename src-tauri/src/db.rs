@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS videos (
   height      INTEGER,
   vcodec      TEXT,
   acodec      TEXT,
+  pix_fmt     TEXT,
   has_audio   INTEGER NOT NULL DEFAULT 0,
   md5         TEXT,
   creator     TEXT,
@@ -102,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_vt_tag ON video_tags(tag_id, video_id);
 pub const VIDEO_COLS: &str = "v.id, v.path, v.file_name, v.ext, v.size, v.mtime, \
      v.duration_ms, v.width, v.height, v.vcodec, v.acodec, v.has_audio, v.md5, \
      v.creator, v.nsfw, v.popping, v.destruction, v.deflation, v.inflation, \
-     v.notes, v.rating, v.reviewed, v.view_count, v.added_at, v.missing";
+     v.notes, v.rating, v.reviewed, v.view_count, v.added_at, v.missing, v.pix_fmt";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +119,7 @@ pub struct VideoDto {
     pub height: Option<i64>,
     pub vcodec: Option<String>,
     pub acodec: Option<String>,
+    pub pix_fmt: Option<String>,
     pub has_audio: bool,
     pub md5: Option<String>,
     pub creator: Option<String>,
@@ -154,6 +156,7 @@ pub fn video_from_row(r: &Row<'_>) -> rusqlite::Result<VideoDto> {
     let ext: String = r.get(3)?;
     let vcodec: Option<String> = r.get(9)?;
     let acodec: Option<String> = r.get(10)?;
+    let pix_fmt: Option<String> = r.get(25)?;
     let duration: Option<i64> = r.get(6)?;
     Ok(VideoDto {
         id: r.get(0)?,
@@ -167,6 +170,7 @@ pub fn video_from_row(r: &Row<'_>) -> rusqlite::Result<VideoDto> {
         height: r.get(8)?,
         vcodec: vcodec.clone(),
         acodec: acodec.clone(),
+        pix_fmt: pix_fmt.clone(),
         has_audio: b(r.get(11)?),
         md5: r.get(12)?,
         creator: r.get(13)?,
@@ -187,6 +191,7 @@ pub fn video_from_row(r: &Row<'_>) -> rusqlite::Result<VideoDto> {
             &r.get::<_, String>(3)?,
             vcodec.as_deref(),
             acodec.as_deref(),
+            pix_fmt.as_deref(),
         )
         .to_string(),
     })
@@ -201,6 +206,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.execute_batch(SCHEMA)?;
     ensure_column(&conn, "videos", "hash_state", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(&conn, "videos", "rel_path", "TEXT")?;
+    ensure_column(&conn, "videos", "pix_fmt", "TEXT")?;
     Ok(conn)
 }
 
@@ -1082,7 +1088,7 @@ pub fn upsert_file(
             if changed {
                 conn.execute(
                     "UPDATE videos SET size = ?2, mtime = ?3, rel_path = ?4, duration_ms = NULL, width = NULL,
-                        height = NULL, vcodec = NULL, acodec = NULL, has_audio = 0, md5 = NULL,
+                        height = NULL, vcodec = NULL, acodec = NULL, pix_fmt = NULL, has_audio = 0, md5 = NULL,
                         hash_state = 0, missing = 0
                      WHERE id = ?1",
                     params![id, size, mtime, rel_path],
@@ -1133,9 +1139,12 @@ pub fn mark_missing(conn: &Connection, seen: &HashSet<String>) -> Result<usize> 
 }
 
 pub fn pending_metadata(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    // Rows indexed by builds that did not store the pixel format are re-probed
+    // once, so the H.264 8-bit check can classify them correctly.
     let mut stmt = conn.prepare(
         "SELECT id, path FROM videos
-         WHERE missing = 0 AND duration_ms IS NULL
+         WHERE missing = 0 AND (duration_ms IS NULL
+            OR (pix_fmt IS NULL AND vcodec = 'h264'))
          ORDER BY size ASC",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1155,7 +1164,7 @@ pub fn pending_hashes(conn: &Connection) -> Result<Vec<(i64, String)>> {
 pub fn set_metadata(conn: &Connection, id: i64, p: &crate::media::ProbeInfo) -> Result<()> {
     conn.execute(
         "UPDATE videos SET duration_ms = ?2, width = ?3, height = ?4, vcodec = ?5,
-            acodec = ?6, has_audio = ?7
+            acodec = ?6, has_audio = ?7, pix_fmt = ?8
          WHERE id = ?1",
         params![
             id,
@@ -1164,7 +1173,8 @@ pub fn set_metadata(conn: &Connection, id: i64, p: &crate::media::ProbeInfo) -> 
             p.height,
             p.vcodec,
             p.acodec,
-            if p.has_audio { 1 } else { 0 }
+            if p.has_audio { 1 } else { 0 },
+            p.pix_fmt
         ],
     )?;
     Ok(())

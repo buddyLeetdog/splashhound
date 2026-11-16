@@ -35,23 +35,67 @@ pub struct ProbeInfo {
     pub height: Option<i64>,
     pub vcodec: Option<String>,
     pub acodec: Option<String>,
+    pub pix_fmt: Option<String>,
     pub has_audio: bool,
     pub format_name: Option<String>,
 }
 
+/// Chromium decodes H.264 only as 8-bit 4:2:0 — Hi10P and 4:2:2 files fail with
+/// a black frame. Rows indexed by older builds have no pixel format stored, so
+/// assume the common case instead of re-encoding them all.
+fn h264_decodable(pix_fmt: Option<&str>) -> bool {
+    match pix_fmt {
+        None => true,
+        Some(p) => matches!(
+            p.to_ascii_lowercase().as_str(),
+            "yuv420p" | "yuvj420p" | "nv12"
+        ),
+    }
+}
+
+/// Audio codecs that can be copied into an MP4 container. Anything else is
+/// re-encoded to AAC, which is cheap and does not touch the video stream.
+pub fn audio_copyable(acodec: Option<&str>) -> bool {
+    match acodec {
+        None => true,
+        Some(a) => matches!(a.to_ascii_lowercase().as_str(), "" | "aac" | "mp3"),
+    }
+}
+
 /// How a file can be handed to the WebView2 player.
-/// direct = play the original file, remux/transcode = stream a cached MP4.
-pub fn playback_str(ext: &str, vcodec: Option<&str>, acodec: Option<&str>) -> &'static str {
+///
+/// direct = play the original file, remux = copy the video stream into a cached
+/// MP4, transcode = re-encode the video.
+///
+/// Only the elementary streams matter to the browser, not the container: any
+/// container ffmpeg reads (MKV, TS/M2TS, FLV, AVI, …) can be remuxed into MP4.
+/// VP8 is excluded from remux because Chromium has no MP4 mapping for it.
+pub fn playback_str(
+    ext: &str,
+    vcodec: Option<&str>,
+    acodec: Option<&str>,
+    pix_fmt: Option<&str>,
+) -> &'static str {
     let ext = ext.to_ascii_lowercase();
     let v = vcodec.unwrap_or("").to_ascii_lowercase();
     let a = acodec.unwrap_or("").to_ascii_lowercase();
     let browser_ext = matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "webm" | "ogv" | "ogg");
-    let browser_v = matches!(v.as_str(), "h264" | "vp8" | "vp9" | "av1");
     let browser_a =
         a.is_empty() || matches!(a.as_str(), "aac" | "mp3" | "opus" | "vorbis" | "flac");
-    if browser_ext && browser_v && browser_a {
-        "direct"
-    } else if matches!(v.as_str(), "h264" | "vp9" | "av1") {
+    let playable_video = match v.as_str() {
+        "h264" => h264_decodable(pix_fmt),
+        "vp8" | "vp9" | "av1" => true,
+        _ => false,
+    };
+    if browser_ext && playable_video && browser_a {
+        return "direct";
+    }
+    let copyable_video = match v.as_str() {
+        "h264" => h264_decodable(pix_fmt),
+        "vp9" | "av1" => true,
+        _ => false,
+    };
+    if copyable_video {
         "remux"
     } else {
         "transcode"
@@ -154,6 +198,10 @@ pub async fn probe(ffprobe: &Path, file: &Path) -> Result<ProbeInfo> {
                         info.vcodec = codec.clone();
                         info.width = stream.get("width").and_then(|v| v.as_i64());
                         info.height = stream.get("height").and_then(|v| v.as_i64());
+                        info.pix_fmt = stream
+                            .get("pix_fmt")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
                         if info.duration_ms.is_none() {
                             info.duration_ms = stream
                                 .get("duration")
@@ -343,18 +391,25 @@ pub async fn run_conversion(state: &Arc<AppState>, v: &VideoDto, out: &Path) -> 
     })?;
 
     let remux = v.playback == "remux";
+    let copy_audio = audio_copyable(v.acodec.as_deref());
     let tmp = out.with_extension("part.mp4");
     let _ = tokio::fs::remove_file(&tmp).await;
 
-    let result = ffmpeg_convert(state, &ffmpeg, v, &tmp, remux).await;
+    let result = ffmpeg_convert(state, &ffmpeg, v, &tmp, remux, copy_audio).await;
     let result = match result {
         Ok(()) => Ok(()),
+        Err(_) if remux && copy_audio => {
+            // Some audio streams cannot live in MP4 even though the video can:
+            // keep the video copy and re-encode only the audio.
+            let _ = tokio::fs::remove_file(&tmp).await;
+            ffmpeg_convert(state, &ffmpeg, v, &tmp, true, false).await
+        }
         Err(e) if remux => {
             // Remux can fail on unusual files (broken timestamps, odd codecs).
             // Fall back to a full re-encode.
             let _ = tokio::fs::remove_file(&tmp).await;
             let _ = e;
-            ffmpeg_convert(state, &ffmpeg, v, &tmp, false).await
+            ffmpeg_convert(state, &ffmpeg, v, &tmp, false, false).await
         }
         Err(e) => Err(e),
     };
@@ -374,19 +429,25 @@ async fn ffmpeg_convert(
     v: &VideoDto,
     out: &Path,
     remux: bool,
+    copy_audio: bool,
 ) -> Result<()> {
     let mut cmd = quiet_command(&ffmpeg.ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-y"]);
     cmd.arg("-i").arg(&v.path);
     cmd.args(["-map", "0:v:0", "-map", "0:a:0?"]);
     if remux {
+        // Video is copied bit for bit; only the container changes.
         cmd.args(["-c:v", "copy"]);
     } else {
         cmd.args([
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
         ]);
     }
-    cmd.args(["-c:a", "aac", "-b:a", "160k"]);
+    if copy_audio {
+        cmd.args(["-c:a", "copy"]);
+    } else {
+        cmd.args(["-c:a", "aac", "-b:a", "160k"]);
+    }
     cmd.args(["-movflags", "+faststart", "-f", "mp4"]);
     cmd.args(["-progress", "pipe:1", "-nostats"]);
     cmd.arg(out);
@@ -576,4 +637,99 @@ pub fn enforce_cache_limit(state: &AppState) -> u64 {
         }
     }
     freed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode(ext: &str, v: Option<&str>, a: Option<&str>, p: Option<&str>) -> &'static str {
+        playback_str(ext, v, a, p)
+    }
+
+    #[test]
+    fn browser_native_files_play_directly() {
+        assert_eq!(
+            mode("mp4", Some("h264"), Some("aac"), Some("yuv420p")),
+            "direct"
+        );
+        assert_eq!(
+            mode("mov", Some("h264"), Some("mp3"), Some("yuvj420p")),
+            "direct"
+        );
+        assert_eq!(
+            mode("webm", Some("vp9"), Some("opus"), Some("yuv420p10le")),
+            "direct"
+        );
+        assert_eq!(mode("webm", Some("vp8"), Some("vorbis"), None), "direct");
+        assert_eq!(mode("mp4", Some("av1"), Some("opus"), None), "direct");
+    }
+
+    #[test]
+    fn unsupported_audio_copies_the_video() {
+        // AC3/DTS/PCM in MP4: keep the video stream, re-encode the audio.
+        assert_eq!(
+            mode("mp4", Some("h264"), Some("ac3"), Some("yuv420p")),
+            "remux"
+        );
+        assert_eq!(mode("mov", Some("h264"), Some("pcm_s16le"), None), "remux");
+        // Same for MKV, but the container changes as well.
+        assert_eq!(
+            mode("mkv", Some("h264"), Some("dts"), Some("yuv420p")),
+            "remux"
+        );
+        assert_eq!(
+            mode("mkv", Some("h264"), Some("aac"), Some("yuv420p")),
+            "remux"
+        );
+    }
+
+    #[test]
+    fn other_containers_are_remuxed_not_transcoded() {
+        for ext in ["m2ts", "mts", "ts", "flv", "avi", "3gp", "mpg"] {
+            assert_eq!(
+                mode(ext, Some("h264"), Some("aac"), Some("yuv420p")),
+                "remux"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_video_is_transcoded() {
+        assert_eq!(
+            mode("avi", Some("mpeg4"), Some("mp3"), Some("yuv420p")),
+            "transcode"
+        );
+        assert_eq!(mode("wmv", Some("vc1"), Some("wmav2"), None), "transcode");
+        assert_eq!(
+            mode("mpg", Some("mpeg2video"), Some("ac3"), None),
+            "transcode"
+        );
+        // VP8 has no MP4 mapping in Chromium, so it cannot be remuxed.
+        assert_eq!(mode("mkv", Some("vp8"), Some("vorbis"), None), "transcode");
+    }
+
+    #[test]
+    fn high_bit_depth_h264_is_transcoded() {
+        assert_eq!(
+            mode("mp4", Some("h264"), Some("aac"), Some("yuv420p10le")),
+            "transcode"
+        );
+        assert_eq!(
+            mode("mkv", Some("h264"), Some("aac"), Some("yuv422p")),
+            "transcode"
+        );
+        // Rows from older builds have no pixel format: assume 8-bit 4:2:0.
+        assert_eq!(mode("mp4", Some("h264"), Some("aac"), None), "direct");
+    }
+
+    #[test]
+    fn audio_can_only_be_copied_when_mp4_can_hold_it() {
+        assert!(audio_copyable(Some("aac")));
+        assert!(audio_copyable(Some("MP3")));
+        assert!(audio_copyable(None));
+        assert!(!audio_copyable(Some("ac3")));
+        assert!(!audio_copyable(Some("dts")));
+        assert!(!audio_copyable(Some("opus")));
+    }
 }
