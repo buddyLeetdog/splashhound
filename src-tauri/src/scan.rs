@@ -43,6 +43,58 @@ fn update(state: &AppState, f: impl FnOnce(&mut ScanStatus)) {
     }
 }
 
+fn set_phase(state: &AppState, phase: &str, total: usize) {
+    update(state, |s| {
+        s.phase = phase.to_string();
+        s.total = total;
+        s.done = 0;
+        s.current.clear();
+        s.eta_seconds = None;
+        s.phase_started = Some(std::time::Instant::now());
+    });
+}
+
+fn set_progress(state: &AppState, done: usize, current: Option<&str>) {
+    update(state, |s| {
+        s.done = done;
+        if let Some(name) = current {
+            s.current = name.to_string();
+        }
+        if let Some(started) = s.phase_started {
+            let elapsed = started.elapsed().as_secs_f64();
+            s.eta_seconds = if done == 0 {
+                None
+            } else if s.total > done {
+                Some((elapsed / done as f64 * (s.total - done) as f64).round() as u64)
+            } else {
+                Some(0)
+            };
+        }
+    });
+}
+
+fn file_name_of(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn apply_probe(state: &AppState, id: i64, path: String, probe: anyhow::Result<media::ProbeInfo>) {
+    if let Ok(conn) = state.db.lock() {
+        match probe {
+            Ok(info) => {
+                let _ = db::set_metadata(&conn, id, &info);
+            }
+            Err(_) => {
+                let _ = db::mark_probe_failed(&conn, id);
+            }
+        }
+    }
+    let name = file_name_of(&path);
+    update(state, |s| s.current = name);
+}
+
 struct FileEntry {
     path: String,
     file_name: String,
@@ -121,14 +173,10 @@ pub async fn run_scan(state: Arc<AppState>) {
 
     let result: Result<()> = async {
         // 1. Walk the tree --------------------------------------------------
-        update(&state, |s| s.phase = "walking".into());
+        set_phase(&state, "walking", 0);
         let root2 = root.clone();
         let files = tokio::task::spawn_blocking(move || collect_files(&root2)).await?;
-        update(&state, |s| {
-            s.phase = "indexing".into();
-            s.total = files.len();
-            s.done = 0;
-        });
+        set_phase(&state, "indexing", files.len());
 
         // 2. Insert / update rows ------------------------------------------
         let now_ts = now();
@@ -183,45 +231,49 @@ pub async fn run_scan(state: Arc<AppState>) {
             update(&state, |s| s.removed = removed);
         }
 
-        // 4. Probe metadata -------------------------------------------------
+        // 4. Probe metadata (parallel) --------------------------------------
         let pending = {
             let conn = state.db.lock().map_err(|e| anyhow!(e.to_string()))?;
             db::pending_metadata(&conn)?
         };
-        update(&state, |s| {
-            s.phase = "probing".into();
-            s.total = pending.len();
-            s.done = 0;
-        });
-
         match state.ffmpeg() {
             Some(ff) => {
-                for (i, (id, path)) in pending.iter().enumerate() {
+                set_phase(&state, "probing", pending.len());
+                let mut jobs: tokio::task::JoinSet<(
+                    i64,
+                    String,
+                    anyhow::Result<media::ProbeInfo>,
+                )> = tokio::task::JoinSet::new();
+                let mut done = 0usize;
+                for (id, path) in pending {
                     if cancel.load(Ordering::SeqCst) {
                         break;
                     }
-                    let name = Path::new(path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.clone());
-                    update(&state, |s| {
-                        s.done = i;
-                        s.current = name.clone();
-                    });
-                    match media::probe(&ff.ffprobe, Path::new(path)).await {
-                        Ok(info) => {
-                            if let Ok(conn) = state.db.lock() {
-                                let _ = db::set_metadata(&conn, *id, &info);
+                    while jobs.len() >= 6 {
+                        if let Some(joined) = jobs.join_next().await {
+                            if let Ok((id, path, probe)) = joined {
+                                apply_probe(&state, id, path, probe);
                             }
-                        }
-                        Err(_) => {
-                            if let Ok(conn) = state.db.lock() {
-                                let _ = db::mark_probe_failed(&conn, *id);
-                            }
+                            done += 1;
+                            set_progress(&state, done, None);
                         }
                     }
+                    let ffmpeg = ff.clone();
+                    jobs.spawn(async move {
+                        let probe = media::probe(&ffmpeg.ffprobe, Path::new(&path)).await;
+                        (id, path, probe)
+                    });
                 }
-                update(&state, |s| s.done = pending.len());
+                while let Some(joined) = jobs.join_next().await {
+                    if let Ok((id, path, probe)) = joined {
+                        apply_probe(&state, id, path, probe);
+                    }
+                    done += 1;
+                    set_progress(&state, done, None);
+                }
+                if cancel.load(Ordering::SeqCst) {
+                    jobs.abort_all();
+                }
             }
             None => {
                 update(&state, |s| {
@@ -235,27 +287,19 @@ pub async fn run_scan(state: Arc<AppState>) {
         }
 
         // 5. Hash files -----------------------------------------------------
-        let pending = {
+        let (pending, mode) = {
             let conn = state.db.lock().map_err(|e| anyhow!(e.to_string()))?;
-            db::pending_hashes(&conn)?
+            let mode = db::hash_mode(&conn);
+            let pending = db::hash_candidates(&conn, &mode)?;
+            (pending, mode)
         };
-        update(&state, |s| {
-            s.phase = "hashing".into();
-            s.total = pending.len();
-            s.done = 0;
-        });
+        let _ = mode;
+        set_phase(&state, "hashing", pending.len());
         for (i, (id, path)) in pending.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 break;
             }
-            let name = Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone());
-            update(&state, |s| {
-                s.done = i;
-                s.current = name.clone();
-            });
+            let name = file_name_of(path);
             let p = PathBuf::from(path);
             let hash = tokio::task::spawn_blocking(move || media::hash_file(&p)).await?;
             if let Ok(hash) = hash {
@@ -263,9 +307,10 @@ pub async fn run_scan(state: Arc<AppState>) {
                     let _ = db::set_md5(&conn, *id, &hash);
                 }
             }
+            set_progress(&state, i + 1, Some(&name));
         }
-        update(&state, |s| s.done = pending.len());
 
+        media::enforce_cache_limit(&state);
         Ok(())
     }
     .await;

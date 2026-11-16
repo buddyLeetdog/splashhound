@@ -85,7 +85,8 @@ Groups byte-identical files by MD5. Pick the keeper with the radio button or
 
 ### Settings
 Library folder, scan progress/stop, ffmpeg location, database/cache/trash
-paths, cache size and cleanup, library statistics.
+paths, hashing mode, cache limit, tag management, metadata export/backup and
+library statistics.
 
 ## Index
 
@@ -106,6 +107,37 @@ Tags live in a separate `tags` table with a `video_tags` join table, so the
 
 Generated preview frames and converted playback files are cached in
 `%LOCALAPPDATA%\com.splashhound.desktop` and can be cleared from Settings.
+
+## Indexing and cache
+
+By default only files whose size collides with another file are hashed — a
+unique size can never be byte-identical to anything else, so this avoids
+reading the whole library. Switch to "hash every file" in Settings for full MD5
+coverage. Probing and hashing show progress with a time estimate.
+
+The cache holding previews and converted playback files has a size limit
+(default 4 GB, configurable) and evicts the oldest entries automatically.
+
+## Near-duplicates (Video DNA)
+
+The Duplicates view has **Exact (MD5)** and **Similar (Video DNA)** tabs. DNA
+analysis samples frames across each video, hashes them perceptually and compares
+the sequences, which finds re-encodes or different resolutions that MD5 cannot.
+It runs on demand from that tab, is incremental and cancellable, and persists.
+
+## Extra workflow
+
+- **Folders**: filter the library by subfolder; "Rate this folder" scopes the
+  rating queue to the current folder selection.
+- **Batch editing**: click Select, pick many cards, then set tags, creator,
+  flags, rating or reviewed state for all of them.
+- **Trash**: files moved out of the library are recorded there and can be
+  restored with their tags/ratings, or deleted permanently.
+- **Tags**: rename (merging into an existing name) or delete tags in Settings.
+- **Data**: export/import tags, ratings and flags as JSON, and back up the
+  database file.
+- **Scrolling**: the library loads the next page automatically when you reach
+  the bottom.
 
 ## Playback
 

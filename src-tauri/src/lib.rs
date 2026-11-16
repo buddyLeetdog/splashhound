@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod dna;
 pub mod media;
 pub mod scan;
 pub mod server;
@@ -36,7 +37,10 @@ pub struct ScanStatus {
     pub failed: usize,
     pub current: String,
     pub error: Option<String>,
+    pub eta_seconds: Option<u64>,
     pub finished_at: Option<i64>,
+    #[serde(skip)]
+    pub phase_started: Option<std::time::Instant>,
     #[serde(skip)]
     pub cancel: Arc<AtomicBool>,
 }
@@ -54,7 +58,9 @@ impl Default for ScanStatus {
             failed: 0,
             current: String::new(),
             error: None,
+            eta_seconds: None,
             finished_at: None,
+            phase_started: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -82,6 +88,7 @@ pub struct AppState {
     pub ffmpeg: RwLock<Option<Ffmpeg>>,
     pub media_base: RwLock<String>,
     pub scan: Arc<Mutex<ScanStatus>>,
+    pub dna: Arc<Mutex<dna::DnaStatus>>,
     pub conversions: Arc<Mutex<HashMap<i64, Conversion>>>,
     pub thumb_locks: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>>,
     pub convert_permits: Arc<tokio::sync::Semaphore>,
@@ -112,6 +119,7 @@ impl AppState {
             ffmpeg: RwLock::new(None),
             media_base: RwLock::new(String::new()),
             scan: Arc::new(Mutex::new(ScanStatus::default())),
+            dna: Arc::new(Mutex::new(dna::DnaStatus::default())),
             conversions: Arc::new(Mutex::new(HashMap::new())),
             thumb_locks: Arc::new(Mutex::new(HashMap::new())),
             convert_permits: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -247,6 +255,10 @@ pub fn run() {
             let port = listener.local_addr()?.port();
             *state.media_base.write().unwrap() = format!("http://127.0.0.1:{}", port);
             server::spawn(state.clone(), listener);
+            let cleanup = state.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                media::enforce_cache_limit(&cleanup);
+            });
             app.manage(state);
             Ok(())
         })
@@ -275,6 +287,23 @@ pub fn run() {
             commands::clear_cache,
             commands::set_ffmpeg_dir,
             commands::set_data_dir,
+            commands::folders,
+            commands::bulk_update,
+            commands::rename_tag,
+            commands::delete_tag,
+            commands::trash_list,
+            commands::restore_trash,
+            commands::delete_trash,
+            commands::set_hash_mode,
+            commands::set_cache_limit,
+            commands::clean_cache,
+            commands::start_dna,
+            commands::dna_status,
+            commands::cancel_dna,
+            commands::similar_duplicates,
+            commands::backup_database,
+            commands::export_library,
+            commands::import_library,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

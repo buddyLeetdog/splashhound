@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS videos (
   view_count  INTEGER NOT NULL DEFAULT 0,
   last_viewed INTEGER,
   added_at    INTEGER NOT NULL DEFAULT 0,
-  missing     INTEGER NOT NULL DEFAULT 0
+  missing     INTEGER NOT NULL DEFAULT 0,
+  hash_state  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -56,6 +57,26 @@ CREATE TABLE IF NOT EXISTS video_tags (
   video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
   tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
   PRIMARY KEY (video_id, tag_id)
+);
+
+CREATE TABLE IF NOT EXISTS trash (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  original_path TEXT NOT NULL,
+  trashed_path  TEXT NOT NULL,
+  file_name     TEXT NOT NULL,
+  size          INTEGER NOT NULL DEFAULT 0,
+  md5           TEXT,
+  meta_json     TEXT,
+  trashed_at    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS video_dna (
+  video_id    INTEGER PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+  frames      TEXT NOT NULL,
+  duration_ms INTEGER,
+  width       INTEGER,
+  height      INTEGER,
+  computed_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_videos_md5 ON videos(md5);
@@ -162,7 +183,28 @@ pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(std::time::Duration::from_secs(15))?;
     conn.execute_batch(SCHEMA)?;
+    ensure_column(&conn, "videos", "hash_state", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(conn)
+}
+
+/// Add a column to an existing database created by an older build.
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut exists = false;
+    {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name.eq_ignore_ascii_case(column) {
+                exists = true;
+                break;
+            }
+        }
+    }
+    if !exists {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    Ok(())
 }
 
 /// Strip the Windows verbatim prefix (`\\?\`) so paths read normally in the UI.
@@ -270,6 +312,7 @@ pub struct VideoFilter {
     pub reviewed: String,
     pub min_rating: i64,
     pub creator: Option<String>,
+    pub folder: Option<String>,
     pub sort: String,
     pub limit: i64,
     pub offset: i64,
@@ -336,6 +379,12 @@ fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
         clauses.push("v.creator = ?".into());
         vals.push(SqlValue::Text(c.to_string()));
     }
+    if let Some(dir) = f.folder.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        let prefix = format!("{}\\", dir.trim_end_matches('\\'));
+        clauses.push("substr(v.path, 1, length(?)) = ?".into());
+        vals.push(SqlValue::Text(prefix.clone()));
+        vals.push(SqlValue::Text(prefix));
+    }
 
     (clauses.join(" AND "), vals)
 }
@@ -377,16 +426,23 @@ pub fn list_videos(conn: &Connection, f: &VideoFilter) -> Result<(i64, Vec<Video
     Ok((total, items))
 }
 
-pub fn rating_queue(conn: &Connection, limit: i64) -> Result<Vec<VideoDto>> {
+pub fn rating_queue(conn: &Connection, limit: i64, folder: Option<&str>) -> Result<Vec<VideoDto>> {
     let limit = limit.clamp(1, 2000);
+    let mut where_sql = String::from("v.missing = 0 AND v.reviewed = 0");
+    let mut vals: Vec<SqlValue> = Vec::new();
+    if let Some(dir) = folder.map(str::trim).filter(|d| !d.is_empty()) {
+        let prefix = format!("{}\\", dir.trim_end_matches('\\'));
+        where_sql.push_str(" AND substr(v.path, 1, length(?1)) = ?1");
+        vals.push(SqlValue::Text(prefix));
+    }
     let sql = format!(
-        "SELECT {} FROM videos v WHERE v.missing = 0 AND v.reviewed = 0
-         ORDER BY v.added_at ASC, v.id ASC LIMIT ?1",
-        VIDEO_COLS
+        "SELECT {} FROM videos v WHERE {} ORDER BY v.added_at ASC, v.id ASC LIMIT ?",
+        VIDEO_COLS, where_sql
     );
+    vals.push(SqlValue::Integer(limit));
     let mut stmt = conn.prepare(&sql)?;
     let mut items: Vec<VideoDto> = stmt
-        .query_map(params![limit], video_from_row)?
+        .query_map(params_from_iter(vals.iter()), video_from_row)?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
     attach_tags(conn, &mut items)?;
@@ -451,6 +507,10 @@ pub struct Stats {
     pub total_size: i64,
     pub total_duration_ms: i64,
     pub hash_pending: i64,
+    pub hash_skipped: i64,
+    pub dna_done: i64,
+    pub dna_pending: i64,
+    pub trash: i64,
 }
 
 pub fn stats(conn: &Connection) -> Result<Stats> {
@@ -461,9 +521,10 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
            COALESCE(SUM(CASE WHEN reviewed = 0 THEN 1 ELSE 0 END),0),
            COALESCE(SUM(nsfw),0),
            COALESCE(SUM(CASE WHEN id IN (SELECT video_id FROM video_tags) THEN 1 ELSE 0 END),0),
-           COALESCE(SUM(CASE WHEN md5 IS NULL OR md5 = '' THEN 1 ELSE 0 END),0),
+           COALESCE(SUM(CASE WHEN (md5 IS NULL OR md5 = '') AND hash_state = 0 THEN 1 ELSE 0 END),0),
            COALESCE(SUM(size),0),
-           COALESCE(SUM(CASE WHEN duration_ms > 0 THEN duration_ms ELSE 0 END),0)
+           COALESCE(SUM(CASE WHEN duration_ms > 0 THEN duration_ms ELSE 0 END),0),
+           COALESCE(SUM(CASE WHEN (md5 IS NULL OR md5 = '') AND hash_state = 2 THEN 1 ELSE 0 END),0)
          FROM videos WHERE missing = 0",
         [],
         |r| {
@@ -476,6 +537,7 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
                 hash_pending: r.get(5)?,
                 total_size: r.get(6)?,
                 total_duration_ms: r.get(7)?,
+                hash_skipped: r.get(8)?,
                 ..Default::default()
             })
         },
@@ -491,6 +553,14 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
     s.missing = conn.query_row("SELECT COUNT(*) FROM videos WHERE missing = 1", [], |r| {
         r.get(0)
     })?;
+    s.trash = conn.query_row("SELECT COUNT(*) FROM trash", [], |r| r.get(0))?;
+    s.dna_done = conn.query_row("SELECT COUNT(*) FROM video_dna", [], |r| r.get(0))?;
+    s.dna_pending = conn.query_row(
+        "SELECT COUNT(*) FROM videos
+         WHERE missing = 0 AND id NOT IN (SELECT video_id FROM video_dna)",
+        [],
+        |r| r.get(0),
+    )?;
     Ok(s)
 }
 
@@ -499,6 +569,20 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
 pub struct TagCount {
     pub name: String,
     pub count: i64,
+}
+
+pub fn all_videos(conn: &Connection) -> Result<Vec<VideoDto>> {
+    let sql = format!(
+        "SELECT {} FROM videos v WHERE v.missing = 0 ORDER BY v.id",
+        VIDEO_COLS
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut items: Vec<VideoDto> = stmt
+        .query_map([], video_from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    attach_tags(conn, &mut items)?;
+    Ok(items)
 }
 
 pub fn all_tags(conn: &Connection) -> Result<Vec<TagCount>> {
@@ -670,7 +754,7 @@ pub fn upsert_file(
                 conn.execute(
                     "UPDATE videos SET size = ?2, mtime = ?3, duration_ms = NULL, width = NULL,
                         height = NULL, vcodec = NULL, acodec = NULL, has_audio = 0, md5 = NULL,
-                        missing = 0
+                        hash_state = 0, missing = 0
                      WHERE id = ?1",
                     params![id, size, mtime],
                 )?;
@@ -765,7 +849,10 @@ pub fn mark_probe_failed(conn: &Connection, id: i64) -> Result<()> {
 }
 
 pub fn set_md5(conn: &Connection, id: i64, md5: &str) -> Result<()> {
-    conn.execute("UPDATE videos SET md5 = ?2 WHERE id = ?1", params![id, md5])?;
+    conn.execute(
+        "UPDATE videos SET md5 = ?2, hash_state = 1 WHERE id = ?1",
+        params![id, md5],
+    )?;
     Ok(())
 }
 
@@ -790,4 +877,510 @@ pub fn delete_video(conn: &mut Connection, id: i64) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+/* ------------------------------ hashing --------------------------------- */
+
+pub fn hash_mode(conn: &Connection) -> String {
+    get_setting(conn, "hash_mode").unwrap_or_else(|| "duplicates".to_string())
+}
+
+pub fn set_hash_mode(conn: &Connection, mode: &str) -> Result<()> {
+    set_setting(conn, "hash_mode", mode)?;
+    if mode == "all" {
+        conn.execute("UPDATE videos SET hash_state = 0 WHERE hash_state = 2", [])?;
+    }
+    Ok(())
+}
+
+/// Files worth hashing. In "duplicates" mode only files whose size is shared
+/// with another file can possibly be byte-identical, so unique sizes are
+/// marked as skipped instead of read in full.
+pub fn hash_candidates(conn: &Connection, mode: &str) -> Result<Vec<(i64, String)>> {
+    if mode == "all" {
+        return pending_hashes(conn);
+    }
+    conn.execute(
+        "UPDATE videos
+            SET hash_state = CASE WHEN size IN (
+                    SELECT size FROM videos WHERE missing = 0
+                    GROUP BY size HAVING COUNT(*) > 1
+                ) THEN 0 ELSE 2 END
+          WHERE missing = 0 AND hash_state <> 1 AND (md5 IS NULL OR md5 = '')",
+        [],
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM videos
+         WHERE missing = 0 AND hash_state = 0 AND (md5 IS NULL OR md5 = '')
+         ORDER BY size ASC",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/* ------------------------------ folders --------------------------------- */
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderCount {
+    pub path: String,
+    pub count: i64,
+}
+
+pub fn folders(conn: &Connection) -> Result<Vec<FolderCount>> {
+    let mut stmt = conn.prepare("SELECT path FROM videos WHERE missing = 0")?;
+    let paths = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for path in paths {
+        let path = path?;
+        let parent = Path::new(&path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !parent.is_empty() {
+            *counts.entry(parent).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<FolderCount> = counts
+        .into_iter()
+        .map(|(path, count)| FolderCount { path, count })
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+/* -------------------------------- tags ---------------------------------- */
+
+/// Rename a tag; if the new name already exists this merges the two.
+pub fn rename_tag(conn: &mut Connection, old: &str, new: &str) -> Result<()> {
+    let new = new.trim();
+    if new.is_empty() {
+        return Err(anyhow!("Tag name cannot be empty."));
+    }
+    let old_id: i64 = conn.query_row(
+        "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
+        params![old],
+        |r| r.get(0),
+    )?;
+    let tx = conn.transaction()?;
+    tx.execute("INSERT OR IGNORE INTO tags(name) VALUES (?1)", params![new])?;
+    let new_id: i64 = tx.query_row(
+        "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
+        params![new],
+        |r| r.get(0),
+    )?;
+    if new_id != old_id {
+        tx.execute(
+            "UPDATE OR IGNORE video_tags SET tag_id = ?1 WHERE tag_id = ?2",
+            params![new_id, old_id],
+        )?;
+        tx.execute("DELETE FROM video_tags WHERE tag_id = ?1", params![old_id])?;
+        tx.execute("DELETE FROM tags WHERE id = ?1", params![old_id])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn delete_tag(conn: &mut Connection, name: &str) -> Result<()> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
+            params![name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM video_tags WHERE tag_id = ?1", params![id])?;
+        tx.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/* ----------------------------- bulk editing ------------------------------ */
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BulkEdit {
+    pub ids: Vec<i64>,
+    pub creator: Option<String>,
+    pub rating: Option<i64>,
+    pub reviewed: Option<bool>,
+    pub nsfw: Option<bool>,
+    pub popping: Option<bool>,
+    pub destruction: Option<bool>,
+    pub deflation: Option<bool>,
+    pub inflation: Option<bool>,
+    pub add_tags: Vec<String>,
+    pub remove_tags: Vec<String>,
+}
+
+pub fn bulk_update(conn: &mut Connection, edit: &BulkEdit) -> Result<usize> {
+    if edit.ids.is_empty() {
+        return Ok(0);
+    }
+    let mut sets: Vec<&str> = Vec::new();
+    let mut vals: Vec<SqlValue> = Vec::new();
+
+    if let Some(creator) = &edit.creator {
+        let trimmed = creator.trim();
+        sets.push("creator = ?");
+        vals.push(if trimmed.is_empty() {
+            SqlValue::Null
+        } else {
+            SqlValue::Text(trimmed.to_string())
+        });
+    }
+    macro_rules! bool_field {
+        ($value:expr, $col:expr) => {
+            if let Some(value) = $value {
+                sets.push($col);
+                vals.push(SqlValue::Integer(if value { 1 } else { 0 }));
+            }
+        };
+    }
+    bool_field!(edit.nsfw, "nsfw = ?");
+    bool_field!(edit.popping, "popping = ?");
+    bool_field!(edit.destruction, "destruction = ?");
+    bool_field!(edit.deflation, "deflation = ?");
+    bool_field!(edit.inflation, "inflation = ?");
+    bool_field!(edit.reviewed, "reviewed = ?");
+    if let Some(rating) = edit.rating {
+        sets.push("rating = ?");
+        vals.push(SqlValue::Integer(rating.clamp(0, 5)));
+    }
+
+    let tx = conn.transaction()?;
+    if !sets.is_empty() {
+        let sql = format!("UPDATE videos SET {} WHERE id = ?", sets.join(", "));
+        let mut stmt = tx.prepare(&sql)?;
+        for id in &edit.ids {
+            let mut row = vals.clone();
+            row.push(SqlValue::Integer(*id));
+            stmt.execute(params_from_iter(row.iter()))?;
+        }
+    }
+
+    for raw in edit.add_tags.iter().chain(edit.remove_tags.iter()) {
+        let name = raw.trim();
+        if !name.is_empty() {
+            tx.execute(
+                "INSERT OR IGNORE INTO tags(name) VALUES (?1)",
+                params![name],
+            )?;
+        }
+    }
+    for raw in &edit.add_tags {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let tag_id: i64 = tx.query_row(
+            "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
+            params![name],
+            |r| r.get(0),
+        )?;
+        for id in &edit.ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO video_tags(video_id, tag_id) VALUES (?1, ?2)",
+                params![id, tag_id],
+            )?;
+        }
+    }
+    for raw in &edit.remove_tags {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let tag_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(tag_id) = tag_id {
+            for id in &edit.ids {
+                tx.execute(
+                    "DELETE FROM video_tags WHERE video_id = ?1 AND tag_id = ?2",
+                    params![id, tag_id],
+                )?;
+            }
+        }
+    }
+    tx.execute(
+        "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM video_tags)",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(edit.ids.len())
+}
+
+/* -------------------------------- trash --------------------------------- */
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashEntry {
+    pub id: i64,
+    pub original_path: String,
+    pub trashed_path: String,
+    pub file_name: String,
+    pub size: i64,
+    pub md5: Option<String>,
+    pub meta_json: Option<String>,
+    pub trashed_at: i64,
+}
+
+pub fn trash_add(
+    conn: &Connection,
+    original_path: &str,
+    trashed_path: &str,
+    file_name: &str,
+    size: i64,
+    md5: Option<&str>,
+    meta_json: Option<&str>,
+    now: i64,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO trash(original_path, trashed_path, file_name, size, md5, meta_json, trashed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            original_path,
+            trashed_path,
+            file_name,
+            size,
+            md5,
+            meta_json,
+            now
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn trash_from_row(r: &Row<'_>) -> rusqlite::Result<TrashEntry> {
+    Ok(TrashEntry {
+        id: r.get(0)?,
+        original_path: r.get(1)?,
+        trashed_path: r.get(2)?,
+        file_name: r.get(3)?,
+        size: r.get(4)?,
+        md5: r.get(5)?,
+        meta_json: r.get(6)?,
+        trashed_at: r.get(7)?,
+    })
+}
+
+pub fn trash_list(conn: &Connection) -> Result<Vec<TrashEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, original_path, trashed_path, file_name, size, md5, meta_json, trashed_at
+         FROM trash ORDER BY trashed_at DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([], trash_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn trash_get(conn: &Connection, id: i64) -> Result<Option<TrashEntry>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, original_path, trashed_path, file_name, size, md5, meta_json, trashed_at
+             FROM trash WHERE id = ?1",
+            params![id],
+            trash_from_row,
+        )
+        .optional()?)
+}
+
+pub fn trash_delete(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM trash WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/* ------------------------------- video DNA ------------------------------ */
+
+pub fn dna_pending(
+    conn: &Connection,
+) -> Result<Vec<(i64, String, Option<i64>, Option<i64>, Option<i64>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT v.id, v.path, v.duration_ms, v.width, v.height FROM videos v
+         WHERE v.missing = 0 AND v.id NOT IN (SELECT video_id FROM video_dna)
+         ORDER BY v.size ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn set_dna(
+    conn: &Connection,
+    id: i64,
+    frames: &str,
+    duration_ms: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO video_dna(video_id, frames, duration_ms, width, height, computed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(video_id) DO UPDATE SET
+             frames = excluded.frames,
+             duration_ms = excluded.duration_ms,
+             width = excluded.width,
+             height = excluded.height,
+             computed_at = excluded.computed_at",
+        params![id, frames, duration_ms, width, height, now],
+    )?;
+    Ok(())
+}
+
+pub fn clear_dna(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM video_dna WHERE video_id = ?1", params![id])?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimilarGroup {
+    pub score: f64,
+    pub videos: Vec<VideoDto>,
+}
+
+fn parse_dna(frames: &str) -> Vec<u64> {
+    frames
+        .split(',')
+        .filter_map(|part| u64::from_str_radix(part.trim(), 16).ok())
+        .collect()
+}
+
+fn frame_similarity(a: &[u64], b: &[u64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let matches = (0..n)
+        .filter(|i| (a[*i] ^ b[*i]).count_ones() <= 12)
+        .count();
+    matches as f64 / n as f64
+}
+
+fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
+}
+
+fn uf_union(parent: &mut [usize], a: usize, b: usize) {
+    let ra = uf_find(parent, a);
+    let rb = uf_find(parent, b);
+    if ra != rb {
+        parent[rb] = ra;
+    }
+}
+
+struct DnaRow {
+    id: i64,
+    frames: Vec<u64>,
+    duration_ms: i64,
+    aspect: f64,
+}
+
+/// Groups of videos whose sampled frame hashes match, even when the files are
+/// re-encodes, different resolutions or slightly different bitrates.
+pub fn similar_groups(conn: &Connection) -> Result<Vec<SimilarGroup>> {
+    let rows: Vec<(i64, String, Option<i64>, Option<i64>, Option<i64>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT d.video_id, d.frames, d.duration_ms, d.width, d.height
+             FROM video_dna d JOIN videos v ON v.id = d.video_id
+             WHERE v.missing = 0",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+
+    let dna: Vec<DnaRow> = rows
+        .into_iter()
+        .filter_map(|(id, frames, duration_ms, width, height)| {
+            let frames = parse_dna(&frames);
+            if frames.len() < 4 {
+                return None;
+            }
+            let aspect = match (width, height) {
+                (Some(w), Some(h)) if h > 0 => w as f64 / h as f64,
+                _ => 0.0,
+            };
+            Some(DnaRow {
+                id,
+                frames,
+                duration_ms: duration_ms.unwrap_or(0),
+                aspect,
+            })
+        })
+        .collect();
+
+    let n = dna.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut edge_scores: HashMap<(usize, usize), f64> = HashMap::new();
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (a, b) = (&dna[i], &dna[j]);
+            if a.duration_ms > 0 && b.duration_ms > 0 {
+                let tolerance = (a.duration_ms as f64 * 0.08).max(3000.0);
+                if (a.duration_ms - b.duration_ms).abs() as f64 > tolerance {
+                    continue;
+                }
+            }
+            if a.aspect > 0.0 && b.aspect > 0.0 && (a.aspect / b.aspect - 1.0).abs() > 0.08 {
+                continue;
+            }
+            let score = frame_similarity(&a.frames, &b.frames);
+            if score >= 0.78 {
+                uf_union(&mut parent, i, j);
+                edge_scores.insert((i, j), score);
+            }
+        }
+    }
+
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        let root = uf_find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+
+    let mut out = Vec::new();
+    for (_, members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        let mut score: f64 = 0.0;
+        for (pos, a) in members.iter().enumerate() {
+            for b in members.iter().skip(pos + 1) {
+                let key = if a < b { (*a, *b) } else { (*b, *a) };
+                if let Some(value) = edge_scores.get(&key) {
+                    score = score.max(*value);
+                }
+            }
+        }
+        let mut videos = Vec::new();
+        for index in &members {
+            if let Some(video) = get_video(conn, dna[*index].id)? {
+                videos.push(video);
+            }
+        }
+        if videos.len() >= 2 {
+            videos.sort_by_key(|v| v.added_at);
+            out.push(SimilarGroup { score, videos });
+        }
+    }
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(out)
 }

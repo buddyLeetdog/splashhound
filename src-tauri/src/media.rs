@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
+    time::SystemTime,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -329,6 +330,7 @@ pub fn spawn_conversion(state: Arc<AppState>, v: VideoDto) {
             Err(e) => set_conversion(&state, v.id, "error", 0.0, Some(format!("{e:#}"))),
         }
         drop(permit);
+        enforce_cache_limit(&state);
     });
 }
 
@@ -431,4 +433,147 @@ async fn ffmpeg_convert(
         bail!("ffmpeg exited with {}: {}", status, tail);
     }
     Ok(())
+}
+
+/* ---------------------------- video DNA -------------------------------- */
+
+pub const DNA_FRAMES: usize = 8;
+
+pub async fn compute_dna(ffmpeg: &Path, file: &Path, duration_ms: Option<i64>) -> Result<Vec<u64>> {
+    let duration = duration_ms.filter(|d| *d > 0).map(|d| d as f64 / 1000.0);
+    let times: Vec<f64> = match duration {
+        Some(seconds) if seconds > 0.5 => (0..DNA_FRAMES)
+            .map(|i| seconds * (i as f64 + 0.5) / DNA_FRAMES as f64)
+            .collect(),
+        _ => (0..DNA_FRAMES).map(|i| 0.5 + i as f64).collect(),
+    };
+    let mut hashes = Vec::with_capacity(times.len());
+    for time in times {
+        if let Ok(hash) = frame_hash(ffmpeg, file, time).await {
+            hashes.push(hash);
+        }
+    }
+    if hashes.len() < 4 {
+        bail!("could not sample enough frames");
+    }
+    Ok(hashes)
+}
+
+async fn frame_hash(ffmpeg: &Path, file: &Path, time: f64) -> Result<u64> {
+    let output = quiet_command(ffmpeg)
+        .args(["-v", "error", "-nostdin", "-ss"])
+        .arg(format!("{:.3}", time))
+        .arg("-i")
+        .arg(file)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=9:8:flags=area,format=gray",
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await?;
+    if output.stdout.len() < 72 {
+        bail!("no frame at {time:.1}s");
+    }
+    let bytes = &output.stdout;
+    let mut hash = 0u64;
+    let mut bit = 0;
+    for y in 0..8 {
+        for x in 0..8 {
+            if bytes[y * 9 + x] > bytes[y * 9 + x + 1] {
+                hash |= 1u64 << bit;
+            }
+            bit += 1;
+        }
+    }
+    Ok(hash)
+}
+
+/* --------------------------- cache management -------------------------- */
+
+pub fn dir_size(path: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    total += dir_size(&entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+struct CacheFile {
+    path: PathBuf,
+    size: u64,
+    modified: SystemTime,
+}
+
+fn collect_cache_files(dir: &Path, out: &mut Vec<CacheFile>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    collect_cache_files(&path, out);
+                } else {
+                    out.push(CacheFile {
+                        path,
+                        size: meta.len(),
+                        modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Evict the oldest generated previews/conversions until the cache is back
+/// under the configured limit (90% of it, to avoid thrashing).
+pub fn enforce_cache_limit(state: &AppState) -> u64 {
+    let limit_mb: u64 = state
+        .setting("cache_limit_mb")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4096);
+    if limit_mb == 0 {
+        return 0;
+    }
+    let limit = limit_mb.saturating_mul(1024 * 1024);
+    let mut files = Vec::new();
+    for sub in ["thumbs", "play"] {
+        collect_cache_files(&state.cache_dir.join(sub), &mut files);
+    }
+    let total: u64 = files.iter().map(|f| f.size).sum();
+    if total <= limit {
+        return 0;
+    }
+    files.sort_by_key(|f| f.modified);
+    let now = SystemTime::now();
+    let mut current = total;
+    let mut freed = 0;
+    for file in files {
+        if current <= limit * 9 / 10 {
+            break;
+        }
+        if let Ok(age) = now.duration_since(file.modified) {
+            if age.as_secs() < 120 {
+                continue; // probably still being written
+            }
+        }
+        if std::fs::remove_file(&file.path).is_ok() {
+            freed += file.size;
+            current = current.saturating_sub(file.size);
+        }
+    }
+    freed
 }

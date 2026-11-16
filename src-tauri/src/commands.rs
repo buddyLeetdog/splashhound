@@ -1,9 +1,11 @@
 use std::{path::Path, path::PathBuf, sync::Arc};
 
-use serde::Serialize;
+use rusqlite::{params, OptionalExtension};
+
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::{config, db, media, scan, AppState, ScanStatus};
+use crate::{config, db, dna, media, scan, AppState, ScanStatus};
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -22,6 +24,8 @@ pub struct Bootstrap {
     pub trash_dir: Option<String>,
     pub ffmpeg_ok: bool,
     pub ffmpeg_dir: Option<String>,
+    pub hash_mode: String,
+    pub cache_limit_mb: u64,
     pub stats: db::Stats,
     pub tags: Vec<db::TagCount>,
     pub creators: Vec<String>,
@@ -34,12 +38,13 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
     let st = state.inner().clone();
     let root = st.root_path();
     let ff = st.ffmpeg();
-    let (stats, tags, creators) = {
+    let (stats, tags, creators, hash_mode) = {
         let conn = st.db.lock().map_err(err)?;
         (
             db::stats(&conn).map_err(err)?,
             db::all_tags(&conn).map_err(err)?,
             db::creators(&conn).map_err(err)?,
+            db::hash_mode(&conn),
         )
     };
     let trash_dir = root
@@ -63,6 +68,11 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default()
         }),
+        hash_mode,
+        cache_limit_mb: st
+            .setting("cache_limit_mb")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096),
         stats,
         tags,
         creators,
@@ -166,9 +176,10 @@ pub async fn save_video(
 pub async fn rating_queue(
     state: State<'_, Arc<AppState>>,
     limit: Option<i64>,
+    folder: Option<String>,
 ) -> Result<Vec<db::VideoDto>, String> {
     let conn = state.inner().db.lock().map_err(err)?;
-    db::rating_queue(&conn, limit.unwrap_or(500)).map_err(err)
+    db::rating_queue(&conn, limit.unwrap_or(500), folder.as_deref()).map_err(err)
 }
 
 #[tauri::command]
@@ -220,6 +231,29 @@ pub async fn remove_duplicate(state: State<'_, Arc<AppState>>, id: i64) -> Resul
 
     {
         let mut conn = st.db.lock().map_err(err)?;
+        let meta = serde_json::json!({
+            "creator": video.creator,
+            "nsfw": video.nsfw,
+            "popping": video.popping,
+            "destruction": video.destruction,
+            "deflation": video.deflation,
+            "inflation": video.inflation,
+            "notes": video.notes,
+            "rating": video.rating,
+            "reviewed": video.reviewed,
+            "tags": video.tags,
+        });
+        let meta_json = serde_json::to_string(&meta).ok();
+        let _ = db::trash_add(
+            &conn,
+            &video.path,
+            &target.to_string_lossy(),
+            &video.file_name,
+            video.size,
+            video.md5.as_deref(),
+            meta_json.as_deref(),
+            scan::now(),
+        );
         db::delete_video(&mut conn, id).map_err(err)?;
     }
     let _ = tokio::fs::remove_dir_all(media::thumb_dir(&st, &video)).await;
@@ -565,4 +599,415 @@ pub async fn set_data_dir(
         db_path: target_db.to_string_lossy().to_string(),
         backup,
     })
+}
+
+/* -------------------------------- folders ------------------------------- */
+
+#[tauri::command]
+pub async fn folders(state: State<'_, Arc<AppState>>) -> Result<Vec<db::FolderCount>, String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::folders(&conn).map_err(err)
+}
+
+/* ----------------------------- bulk editing ----------------------------- */
+
+#[tauri::command]
+pub async fn bulk_update(
+    state: State<'_, Arc<AppState>>,
+    edit: db::BulkEdit,
+) -> Result<usize, String> {
+    let mut conn = state.inner().db.lock().map_err(err)?;
+    db::bulk_update(&mut conn, &edit).map_err(err)
+}
+
+/* ---------------------------- tag management ---------------------------- */
+
+#[tauri::command]
+pub async fn rename_tag(
+    state: State<'_, Arc<AppState>>,
+    old: String,
+    new: String,
+) -> Result<(), String> {
+    let mut conn = state.inner().db.lock().map_err(err)?;
+    db::rename_tag(&mut conn, &old, &new).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn delete_tag(state: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
+    let mut conn = state.inner().db.lock().map_err(err)?;
+    db::delete_tag(&mut conn, &name).map_err(|e| format!("{e:#}"))
+}
+
+/* -------------------------------- trash --------------------------------- */
+
+#[tauri::command]
+pub async fn trash_list(state: State<'_, Arc<AppState>>) -> Result<Vec<db::TrashEntry>, String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::trash_list(&conn).map_err(err)
+}
+
+#[tauri::command]
+pub async fn restore_trash(state: State<'_, Arc<AppState>>, id: i64) -> Result<String, String> {
+    let st = state.inner().clone();
+    let entry = {
+        let conn = st.db.lock().map_err(err)?;
+        db::trash_get(&conn, id).map_err(err)?
+    }
+    .ok_or("Trash entry not found.")?;
+
+    let source = PathBuf::from(&entry.trashed_path);
+    if !source.is_file() {
+        return Err(format!("The trashed file is missing: {}", source.display()));
+    }
+    let target = PathBuf::from(&entry.original_path);
+    if target.exists() {
+        return Err(format!("A file already exists at {}", target.display()));
+    }
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(err)?;
+    }
+    if tokio::fs::rename(&source, &target).await.is_err() {
+        tokio::fs::copy(&source, &target).await.map_err(err)?;
+        tokio::fs::remove_file(&source).await.map_err(err)?;
+    }
+
+    let path_str = target.to_string_lossy().to_string();
+    let file_name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| entry.file_name.clone());
+    let ext = target
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let meta = tokio::fs::metadata(&target).await.map_err(err)?;
+    let size = meta.len() as i64;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let new_id = {
+        let mut conn = st.db.lock().map_err(err)?;
+        let upsert = db::upsert_file(&conn, &path_str, &file_name, &ext, size, mtime, scan::now())
+            .map_err(err)?;
+        if let Some(json) = &entry.meta_json {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
+                let patch = db::VideoPatch {
+                    creator: value
+                        .get("creator")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    notes: value
+                        .get("notes")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    nsfw: value.get("nsfw").and_then(|v| v.as_bool()),
+                    popping: value.get("popping").and_then(|v| v.as_bool()),
+                    destruction: value.get("destruction").and_then(|v| v.as_bool()),
+                    deflation: value.get("deflation").and_then(|v| v.as_bool()),
+                    inflation: value.get("inflation").and_then(|v| v.as_bool()),
+                    rating: value.get("rating").and_then(|v| v.as_i64()),
+                    reviewed: value.get("reviewed").and_then(|v| v.as_bool()),
+                    tags: value.get("tags").and_then(|v| v.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    }),
+                };
+                let _ = db::save_video(&mut conn, upsert.id, &patch);
+            }
+        }
+        if let Some(md5) = &entry.md5 {
+            let _ = db::set_md5(&conn, upsert.id, md5);
+        }
+        db::trash_delete(&conn, id).map_err(err)?;
+        upsert.id
+    };
+
+    if let Some(ffmpeg) = st.ffmpeg() {
+        if let Ok(info) = media::probe(&ffmpeg.ffprobe, &target).await {
+            if let Ok(conn) = st.db.lock() {
+                let _ = db::set_metadata(&conn, new_id, &info);
+            }
+        }
+    }
+    Ok(path_str)
+}
+
+#[tauri::command]
+pub async fn delete_trash(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), String> {
+    let st = state.inner().clone();
+    let entry = {
+        let conn = st.db.lock().map_err(err)?;
+        db::trash_get(&conn, id).map_err(err)?
+    }
+    .ok_or("Trash entry not found.")?;
+    let path = PathBuf::from(&entry.trashed_path);
+    let _ = tokio::fs::remove_file(&path).await;
+    let conn = st.db.lock().map_err(err)?;
+    db::trash_delete(&conn, id).map_err(err)
+}
+
+/* --------------------------- indexing options --------------------------- */
+
+#[tauri::command]
+pub async fn set_hash_mode(state: State<'_, Arc<AppState>>, mode: String) -> Result<(), String> {
+    if mode != "all" && mode != "duplicates" {
+        return Err("Unknown hash mode.".into());
+    }
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::set_hash_mode(&conn, &mode).map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_cache_limit(state: State<'_, Arc<AppState>>, mb: u64) -> Result<u64, String> {
+    let st = state.inner().clone();
+    st.set_setting("cache_limit_mb", &mb.to_string())?;
+    Ok(media::enforce_cache_limit(&st))
+}
+
+#[tauri::command]
+pub async fn clean_cache(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
+    let st = state.inner().clone();
+    Ok(media::enforce_cache_limit(&st))
+}
+
+/* ------------------------------- video DNA ------------------------------ */
+
+#[tauri::command]
+pub async fn start_dna(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if state.inner().scan.lock().map_err(err)?.running {
+        return Err("Wait for the current scan to finish.".into());
+    }
+    dna::spawn(state.inner().clone());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn dna_status(state: State<'_, Arc<AppState>>) -> Result<dna::DnaStatus, String> {
+    Ok(state.inner().dna.lock().map_err(err)?.clone())
+}
+
+#[tauri::command]
+pub async fn cancel_dna(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let status = state.inner().dna.lock().map_err(err)?;
+    status
+        .cancel
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn similar_duplicates(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<db::SimilarGroup>, String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::similar_groups(&conn).map_err(err)
+}
+
+/* ------------------------ export / import / backup ---------------------- */
+
+#[derive(Serialize, Deserialize)]
+struct ExportVideo {
+    path: String,
+    #[serde(default)]
+    md5: Option<String>,
+    #[serde(default)]
+    creator: Option<String>,
+    #[serde(default)]
+    nsfw: bool,
+    #[serde(default)]
+    popping: bool,
+    #[serde(default)]
+    destruction: bool,
+    #[serde(default)]
+    deflation: bool,
+    #[serde(default)]
+    inflation: bool,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    rating: i64,
+    #[serde(default)]
+    reviewed: bool,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    exported_at: i64,
+    #[serde(default)]
+    videos: Vec<ExportVideo>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub matched: usize,
+    pub unmatched: usize,
+    pub total: usize,
+}
+
+#[tauri::command]
+pub async fn export_library(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
+    let st = state.inner().clone();
+    let picked = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Export library metadata")
+            .set_file_name("splashhound-metadata.json")
+            .add_filter("JSON", &["json"])
+            .save_file()
+    })
+    .await
+    .map_err(err)?;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+
+    let videos = {
+        let conn = st.db.lock().map_err(err)?;
+        db::all_videos(&conn).map_err(err)?
+    };
+    let export = ExportFile {
+        version: 1,
+        exported_at: scan::now(),
+        videos: videos
+            .iter()
+            .map(|v| ExportVideo {
+                path: v.path.clone(),
+                md5: v.md5.clone(),
+                creator: v.creator.clone(),
+                nsfw: v.nsfw,
+                popping: v.popping,
+                destruction: v.destruction,
+                deflation: v.deflation,
+                inflation: v.inflation,
+                notes: v.notes.clone(),
+                rating: v.rating,
+                reviewed: v.reviewed,
+                tags: v.tags.clone(),
+            })
+            .collect(),
+    };
+    let text = serde_json::to_string_pretty(&export).map_err(err)?;
+    tokio::fs::write(&path, text).await.map_err(err)?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn import_library(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<ImportResult>, String> {
+    let st = state.inner().clone();
+    let picked = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Import library metadata")
+            .add_filter("JSON", &["json"])
+            .pick_file()
+    })
+    .await
+    .map_err(err)?;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+
+    let text = tokio::fs::read_to_string(&path).await.map_err(err)?;
+    let data: ExportFile = serde_json::from_str(&text)
+        .map_err(|e| format!("Not a Splashhound metadata export: {e}"))?;
+
+    let total = data.videos.len();
+    let mut matched = 0usize;
+    let mut unmatched = 0usize;
+    let mut conn = st.db.lock().map_err(err)?;
+    for item in &data.videos {
+        let by_hash: Option<i64> = if let Some(md5) = item.md5.as_deref().filter(|m| !m.is_empty())
+        {
+            conn.query_row(
+                "SELECT id FROM videos WHERE md5 = ?1 AND missing = 0 LIMIT 1",
+                params![md5],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?
+        } else {
+            None
+        };
+        let id = match by_hash {
+            Some(id) => Some(id),
+            None => conn
+                .query_row(
+                    "SELECT id FROM videos WHERE path = ?1 LIMIT 1",
+                    params![item.path],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(err)?,
+        };
+        let Some(id) = id else {
+            unmatched += 1;
+            continue;
+        };
+        let patch = db::VideoPatch {
+            creator: item.creator.clone(),
+            notes: item.notes.clone(),
+            nsfw: Some(item.nsfw),
+            popping: Some(item.popping),
+            destruction: Some(item.destruction),
+            deflation: Some(item.deflation),
+            inflation: Some(item.inflation),
+            rating: Some(item.rating),
+            reviewed: Some(item.reviewed),
+            tags: Some(item.tags.clone()),
+        };
+        if db::save_video(&mut conn, id, &patch).is_ok() {
+            matched += 1;
+        } else {
+            unmatched += 1;
+        }
+    }
+    Ok(Some(ImportResult {
+        matched,
+        unmatched,
+        total,
+    }))
+}
+
+#[tauri::command]
+pub async fn backup_database(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
+    let st = state.inner().clone();
+    let picked = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Back up library database")
+            .set_file_name("splashhound-backup.db")
+            .add_filter("SQLite", &["db"])
+            .save_file()
+    })
+    .await
+    .map_err(err)?;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+
+    let db = st.db.clone();
+    let source = st.db_path();
+    let target = path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let guard = db.lock().map_err(|e| e.to_string())?;
+        guard
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| e.to_string())?;
+        std::fs::copy(&source, &target).map_err(|e| format!("Could not write backup: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(err)??;
+
+    Ok(Some(path.to_string_lossy().to_string()))
 }

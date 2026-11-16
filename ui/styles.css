@@ -385,3 +385,45 @@ kbd {
 .ac-meta { color: var(--muted); font-size: 11px; flex: none; }
 .ac-item.active .ac-meta { color: #8ad9c5; }
 @keyframes ac-in { from { opacity: 0; transform: translateY(-3px); } }
+
+/* ---------- tabs ---------- */
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--line-soft); }
+.tab {
+  background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted);
+  padding: 8px 12px; font-family: inherit; font-size: 13px; cursor: pointer; margin-bottom: -1px;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* ---------- bulk selection ---------- */
+.card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(53, 208, 165, 0.25); }
+.card-check {
+  position: absolute; left: 7px; top: 7px; z-index: 3; width: 22px; height: 22px;
+  border-radius: 6px; background: rgba(6, 10, 14, 0.82); border: 1px solid rgba(255, 255, 255, 0.35);
+  display: grid; place-items: center; cursor: pointer;
+}
+.card-check input { width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; margin: 0; }
+.grid.selecting .card { cursor: default; }
+.grid.selecting .card:hover { transform: none; }
+.bulk-bar {
+  display: flex; align-items: center; gap: 8px; background: var(--panel);
+  border: 1px solid var(--accent-dim); border-radius: 10px; padding: 8px 12px; margin-bottom: 12px;
+  position: sticky; top: 0; z-index: 5;
+}
+.bulk-bar .small { margin-right: auto; }
+.bulk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+.bulk-flags { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
+.bulk-flag { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+.bulk-flag .select { padding: 3px 6px; font-size: 11px; }
+
+/* ---------- duplicates / tags ---------- */
+.dup-head .score { color: var(--accent); font-weight: 600; }
+.tag-manager { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; margin-bottom: 8px; }
+.tag-row { display: grid; grid-template-columns: 1fr auto auto auto; align-items: center; gap: 8px; padding: 5px 4px; border-bottom: 1px solid var(--line-soft); }
+.tag-row:last-child { border-bottom: none; }
+.tag-name { font-size: 13px; }
+.trash-table .fname { max-width: 420px; }
+
+#f-folder { max-width: 230px; }
+#rate-folder { max-width: 260px; }
+
