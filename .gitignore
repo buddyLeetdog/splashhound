@@ -4,15 +4,11 @@
 
 # Local sample media (large binaries, not source)
 /example videos/
+/example pics/
 
 # OS / editor cruft
-Thumbs.db
-desktop.ini
-.DS_Store
-.idea/
-.vscode/
 *.log
 /tools/*.png
 /tools/proposals/
 __pycache__/
-
+*.txt
