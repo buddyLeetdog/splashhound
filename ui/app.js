@@ -534,6 +534,7 @@ function viewLibrary() {
       <button class="btn tiny" id="bulk-all">Select all loaded</button>
       <button class="btn tiny" id="bulk-clear">Clear</button>
       <button class="btn primary tiny" id="bulk-edit">Edit selection...</button>
+      <button class="btn tiny danger" id="bulk-trash" disabled>Move to trash</button>
     </div>
 
     <div class="grid" id="lib-grid"></div>
@@ -620,6 +621,7 @@ function viewLibrary() {
     updateBulkBar();
   });
   $('#bulk-edit').addEventListener('click', openBulkEditor);
+  $('#bulk-trash').addEventListener('click', trashSelection);
   $('#lib-rate-folder').addEventListener('click', () => {
     state.rate.folder = f.folder;
     navigate('rate');
@@ -686,6 +688,37 @@ function updateBulkBar() {
   bar.classList.toggle('hidden', count === 0);
   const label = $('#bulk-count');
   if (label) label.textContent = `${count} selected`;
+  const trash = $('#bulk-trash');
+  if (trash) trash.disabled = count === 0;
+}
+
+/** Bulk "move selected to trash" from the library batch bar. */
+async function trashSelection() {
+  const ids = [...state.lib.selected];
+  if (!ids.length) return;
+  const ok = await confirmDialog({
+    title: `Move ${ids.length} video${ids.length === 1 ? '' : 's'} to trash?`,
+    message: `They will be moved to ${state.boot?.trashDir || 'the _trash folder'} and can be restored from the Trash view.`,
+    okLabel: 'Move to trash',
+    danger: true,
+  });
+  if (!ok) return;
+  await releasePlayback();
+  try {
+    const res = await invoke('trash_many', { ids });
+    state.lib.selected.clear();
+    const failed = res.failed || 0;
+    toast(
+      `Moved ${res.moved} to trash${failed ? `, ${failed} failed` : ''}.`,
+      failed ? 'error' : 'info',
+    );
+    if (failed && res.errors?.length) console.warn(res.errors.join('\n'));
+    await refreshMeta();
+    loadLibrary(true);
+    updateBulkBar();
+  } catch (err) {
+    toast(String(err), 'error');
+  }
 }
 
 async function openBulkEditor() {
@@ -1974,6 +2007,23 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
 
 /* ------------------------------ player ---------------------------------- */
 
+/**
+ * Let go of files before moving them. The built-in player's ffmpeg and the
+ * browser's media reader keep them open, and Windows refuses to move a file that
+ * another process is decoding.
+ */
+async function releasePlayback() {
+  stopStreamPlayer();
+  ['#d-video', '#r-video'].forEach((selector) => {
+    const el = document.querySelector(selector);
+    if (!el) return;
+    el.pause();
+    el.removeAttribute('src');
+    el.load();
+  });
+  await sleep(300);
+}
+
 /** What will actually play the file: the built-in player handles anything that
  *  is not directly playable by the webview. */
 function playbackText(v) {
@@ -2201,6 +2251,7 @@ function mountDetail(v, ids, index, root, close, fullscreen = false) {
       return;
     }
     try {
+      await releasePlayback();
       await invoke('trash_video', { id: v.id });
       state.detail = null;
       close();
@@ -2399,6 +2450,7 @@ function renderRateCurrent() {
     });
     if (!ok) return;
     try {
+      await releasePlayback();
       await invoke('trash_video', { id: v.id });
       state.rate.queue.splice(state.rate.index, 1);
       toast('Moved to trash.');

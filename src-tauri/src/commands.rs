@@ -280,6 +280,64 @@ pub async fn trash_video(state: State<'_, Arc<AppState>>, id: i64) -> Result<Str
     trash_by_id(&st, id).await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashManyResult {
+    pub moved: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+
+/// Bulk variant used by the library's batch selection.
+#[tauri::command]
+pub async fn trash_many(
+    state: State<'_, Arc<AppState>>,
+    ids: Vec<i64>,
+) -> Result<TrashManyResult, String> {
+    let st = state.inner().clone();
+    let mut moved = 0usize;
+    let mut errors = Vec::new();
+    for id in ids {
+        match trash_by_id(&st, id).await {
+            Ok(_) => moved += 1,
+            Err(e) => errors.push(e),
+        }
+    }
+    if moved == 0 && !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    Ok(TrashManyResult {
+        moved,
+        failed: errors.len(),
+        errors,
+    })
+}
+
+/// Move a file, retrying while another process still has it open. Windows
+/// refuses to rename a file that a decoder is reading, and handles close a
+/// moment after playback stops.
+async fn move_into_place(src: &Path, target: &Path) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 0..20 {
+        match tokio::fs::rename(src, target).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = e.to_string(),
+        }
+        // Copy+delete works when only the rename is blocked (read-only sharing).
+        if attempt >= 4 {
+            if tokio::fs::copy(src, target).await.is_ok() {
+                let _ = tokio::fs::remove_file(src).await;
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+    Err(format!(
+        "could not move the file: {last_error}. It is still open in the player or being converted \
+         — stop playback and try again."
+    ))
+}
+
 /// Move a video to `<library>/_trash`, keeping its metadata for a restore.
 pub(crate) async fn trash_by_id(st: &Arc<AppState>, id: i64) -> Result<String, String> {
     let video = st.video(id).ok_or("Video not found.")?;
@@ -313,10 +371,7 @@ pub(crate) async fn trash_by_id(st: &Arc<AppState>, id: i64) -> Result<String, S
         }
     }
 
-    if tokio::fs::rename(&src, &target).await.is_err() {
-        tokio::fs::copy(&src, &target).await.map_err(err)?;
-        tokio::fs::remove_file(&src).await.map_err(err)?;
-    }
+    move_into_place(&src, &target).await?;
 
     {
         let mut conn = st.db.lock().map_err(err)?;
