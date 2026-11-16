@@ -303,6 +303,17 @@ pub fn backfill_rel_paths(conn: &Connection, root: &str) -> Result<usize> {
     Ok(filled)
 }
 
+/// Join a stored relative path onto a root without assuming the host separator.
+/// A database can be moved between platforms, and roots may be written with
+/// either separator, so follow the style already used by the root.
+fn join_stored(root: &str, rel: &str) -> String {
+    let root = root.trim_end_matches(['\\', '/']);
+    let sep = if root.contains('\\') { '\\' } else { '/' };
+    let sep_str = sep.to_string();
+    let rel = rel.replace(['/', '\\'], &sep_str);
+    format!("{root}{sep}{rel}")
+}
+
 /// Rewrite every absolute path to the new root, keeping ids/tags/ratings.
 pub fn repath_library(conn: &mut Connection, new_root: &str) -> Result<usize> {
     let root = new_root.trim_end_matches(['\\', '/']).to_string();
@@ -315,9 +326,7 @@ pub fn repath_library(conn: &mut Connection, new_root: &str) -> Result<usize> {
     let tx = conn.transaction()?;
     let mut moved = 0;
     for (id, rel) in rows {
-        // `Path::join` uses the platform separator, so this works for both
-        // `D:\New\sub\a.mp4` and `/new/sub/a.mp4`.
-        let new_path = Path::new(&root).join(&rel).to_string_lossy().to_string();
+        let new_path = join_stored(&root, &rel);
         if tx.execute(
             "UPDATE OR IGNORE videos SET path = ?1 WHERE id = ?2",
             params![new_path, id],
@@ -344,10 +353,7 @@ pub fn repath_trash(conn: &mut Connection, old_root: &str, new_root: &str) -> Re
         if let Some(rel) = relative_to(&path, old_root) {
             tx.execute(
                 "UPDATE trash SET original_path = ?1 WHERE id = ?2",
-                params![
-                    Path::new(&root).join(&rel).to_string_lossy().to_string(),
-                    id
-                ],
+                params![join_stored(&root, &rel), id],
             )?;
             moved += 1;
         }
@@ -2044,6 +2050,14 @@ mod tests {
             relative_to("/home/u/videos/a.mp4", "/home/u/videos/"),
             Some("a.mp4".to_string())
         );
+    }
+
+    #[test]
+    fn join_stored_follows_the_roots_separator() {
+        assert_eq!(join_stored(r"E:\New", r"a\b.mp4"), r"E:\New\a\b.mp4");
+        assert_eq!(join_stored(r"E:\New\", "a/b.mp4"), r"E:\New\a\b.mp4");
+        assert_eq!(join_stored("/new", "a/b.mp4"), "/new/a/b.mp4");
+        assert_eq!(join_stored("/new/", r"a\b.mp4"), "/new/a/b.mp4");
     }
 
     #[test]

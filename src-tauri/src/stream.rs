@@ -271,7 +271,10 @@ fn now_ms() -> u64 {
 }
 
 fn quiet_command(program: &std::path::Path) -> tokio::process::Command {
+    #[cfg(windows)]
     let mut cmd = std::process::Command::new(program);
+    #[cfg(not(windows))]
+    let cmd = std::process::Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

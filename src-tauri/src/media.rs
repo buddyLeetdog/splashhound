@@ -20,7 +20,10 @@ use crate::{db, db::VideoDto, AppState, Conversion, Ffmpeg};
 /// GUI-subsystem binary, so every child process would otherwise get its own
 /// console for a moment (very visible while scanning a large library).
 fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    #[cfg(windows)]
     let mut command = std::process::Command::new(program);
+    #[cfg(not(windows))]
+    let command = std::process::Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
