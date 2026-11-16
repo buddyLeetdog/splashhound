@@ -474,3 +474,10 @@ kbd {
 
 .file-path { word-break: break-all; line-height: 1.35; margin: 2px 0 10px; user-select: text; }
 
+
+/* visible-fields panel sits beside Data/Stats */
+.settings-grid > .panel:nth-child(11) { order: 7; }
+.settings-grid > .panel:nth-child(7) { order: 8; }
+.settings-grid > .panel:nth-child(8) { order: 9; }
+.settings-grid > .panel:nth-child(9) { order: 10; }
+

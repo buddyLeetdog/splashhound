@@ -308,6 +308,7 @@ pub fn run() {
             commands::purge_missing,
             commands::dismiss_ffmpeg_prompt,
             commands::check_ffmpeg,
+            commands::set_flag_visible,
             commands::set_cache_limit,
             commands::clean_cache,
             commands::start_dna,

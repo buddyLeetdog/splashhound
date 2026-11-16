@@ -10,6 +10,7 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 const state = {
   boot: null,
+  visibleFlags: { nsfw: true, popping: true, destruction: true },
   media: '',
   stats: {},
   tags: [],
@@ -41,8 +42,23 @@ const FLAGS = [
 
 /* ----------------------------- helpers ---------------------------------- */
 
-function esc(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
+function flagVisible(key) {
+  if (key === 'nsfw' || key === 'popping' || key === 'destruction') {
+    return state.visibleFlags ? state.visibleFlags[key] !== false : true;
+  }
+  return true;
+}
+
+function flagHints() {
+  const parts = [];
+  if (flagVisible('nsfw')) parts.push('<kbd>N</kbd> NSFW');
+  if (flagVisible('popping')) parts.push('<kbd>P</kbd> popping');
+  if (flagVisible('destruction')) parts.push('<kbd>D</kbd> destruction');
+  parts.push('<kbd>F</kbd> deflation', '<kbd>I</kbd> inflation');
+  return parts.join(' \u00b7 ');
+}
+
+function esc(value) {  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 }
@@ -267,6 +283,7 @@ async function init() {
   try {
     const boot = await invoke('bootstrap');
     state.boot = boot;
+    state.visibleFlags = boot.visibleFlags || state.visibleFlags;
     state.media = boot.mediaBase;
     state.stats = boot.stats;
     state.tags = boot.tags;
@@ -422,11 +439,12 @@ function viewLibrary() {
     <div class="toolbar">
       <input class="input search" id="f-search" placeholder="Search file name, path, creator, notes..." value="${esc(f.search)}">
       <select class="select" id="f-folder">${folderOptionsHtml(f.folder)}</select>
+      ${state.visibleFlags.nsfw ? `
       <select class="select" id="f-nsfw">
         <option value="any">NSFW: any</option>
         <option value="yes">NSFW only</option>
         <option value="no">SFW only</option>
-      </select>
+      </select>` : ''}
       <select class="select" id="f-reviewed">
         <option value="any">Reviewed: any</option>
         <option value="yes">Reviewed</option>
@@ -470,7 +488,8 @@ function viewLibrary() {
     <div class="load-more"><button class="btn" id="lib-more" style="display:none">Load more</button></div>
   `;
 
-  $('#f-nsfw').value = f.nsfw;
+  const nsfwFilter = $('#f-nsfw');
+  if (nsfwFilter) nsfwFilter.value = f.nsfw;
   $('#f-reviewed').value = f.reviewed;
   $('#f-rating').value = String(f.minRating);
   $('#f-sort').value = f.sort;
@@ -481,7 +500,7 @@ function viewLibrary() {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => loadLibrary(true), 280);
   });
-  $('#f-nsfw').addEventListener('change', (e) => { f.nsfw = e.target.value; loadLibrary(true); });
+  if ($('#f-nsfw')) $('#f-nsfw').addEventListener('change', (e) => { f.nsfw = e.target.value; loadLibrary(true); });
   $('#f-reviewed').addEventListener('change', (e) => { f.reviewed = e.target.value; loadLibrary(true); });
   $('#f-rating').addEventListener('change', (e) => { f.minRating = Number(e.target.value); loadLibrary(true); });
   $('#f-creator').addEventListener('change', (e) => { f.creator = e.target.value; loadLibrary(true); });
@@ -642,7 +661,7 @@ async function openBulkEditor() {
       <div class="field">
         <label>Flags</label>
         <div class="bulk-flags">
-          ${FLAGS.map(([k, label]) => `
+          ${FLAGS.filter(([k]) => flagVisible(k)).map(([k, label]) => `
             <label class="check bulk-flag"><span>${label}</span>
               <select class="select" data-bulk-flag="${k}">
                 <option value="">-</option><option value="1">yes</option><option value="0">no</option>
@@ -901,7 +920,7 @@ function renderLibraryGrid() {
 }
 
 function cardHtml(v) {
-  const badges = FLAGS.filter(([k]) => v[k])
+  const badges = FLAGS.filter(([k]) => flagVisible(k) && v[k])
     .map(([k, label]) => `<span class="badge ${k === 'nsfw' ? 'nsfw' : ''}">${label}</span>`)
     .join('');
   const toyBadges = (v.toys || [])
@@ -1051,7 +1070,7 @@ function editorHtml(v, prefix, reviewedInitial) {
     <div class="field">
       <label>Flags</label>
       <div class="flags">
-        ${FLAGS.map(([k, label]) => `<button type="button" class="flag" data-flag="${k}">${label}</button>`).join('')}
+        ${FLAGS.filter(([k]) => flagVisible(k)).map(([k, label]) => `<button type="button" class="flag" data-flag="${k}">${label}</button>`).join('')}
       </div>
     </div>
     <div class="field">
@@ -1645,7 +1664,7 @@ function renderRateCurrent() {
         </div>
         <div class="kbd-hint">
           <kbd>Enter</kbd> save &amp; next \u00b7 <kbd>S</kbd> skip \u00b7 <kbd>1</kbd>-<kbd>5</kbd> rating<br>
-          <kbd>N</kbd> NSFW \u00b7 <kbd>P</kbd> popping \u00b7 <kbd>D</kbd> destruction \u00b7 <kbd>F</kbd> deflation \u00b7 <kbd>I</kbd> inflation<br>
+          ${flagHints()}<br>
           <kbd>Shift</kbd>+<kbd>\u2190</kbd>/<kbd>\u2192</kbd> 10s \u00b7 <kbd>Ctrl</kbd>+<kbd>\u2190</kbd>/<kbd>\u2192</kbd> 1min
         </div>
       </aside>
@@ -2522,7 +2541,7 @@ function viewSettings() {
         <h2>Library stats</h2>
         <div class="kv">Videos: ${state.stats.total || 0} (${fmtSize(state.stats.totalSize || 0)})</div>
         <div class="kv">Reviewed: ${state.stats.reviewed || 0} \u00b7 Unreviewed: ${state.stats.unreviewed || 0}</div>
-        <div class="kv">Tagged: ${state.stats.tagged || 0} \u00b7 NSFW: ${state.stats.nsfw || 0}</div>
+        <div class="kv">Tagged: ${state.stats.tagged || 0}${state.visibleFlags.nsfw ? ` \u00b7 NSFW: ${state.stats.nsfw || 0}` : ''}</div>
         <div class="kv">Duplicate groups: ${state.stats.duplicates || 0}</div>
         <div class="kv">Hash: ${state.stats.hashPending || 0} pending \u00b7 ${state.stats.hashSkipped || 0} skipped</div>
         <div class="kv">Video DNA: ${state.stats.dnaDone || 0} analyzed \u00b7 ${state.stats.dnaPending || 0} to go</div>
@@ -2546,6 +2565,20 @@ function viewSettings() {
         <div class="kv">Splashhound ${esc(b.version || '')}</div>
         <div class="kv">Local-only app. No network access beyond 127.0.0.1 media streaming.</div>
         <div class="kv">Media cache is served on <code>${esc(b.mediaBase || '')}</code></div>
+      </section>
+
+      <section class="panel">
+        <h2>Visible fields</h2>
+        <p class="muted small">Hide flags you don't want to see. Nothing is deleted; unhide them at any time.</p>
+        <label class="check" style="margin-bottom:6px">
+          <input type="checkbox" id="vis-nsfw" ${state.visibleFlags.nsfw ? 'checked' : ''}> Show NSFW
+        </label>
+        <label class="check" style="margin-bottom:6px">
+          <input type="checkbox" id="vis-popping" ${state.visibleFlags.popping ? 'checked' : ''}> Show Popping
+        </label>
+        <label class="check">
+          <input type="checkbox" id="vis-destruction" ${state.visibleFlags.destruction ? 'checked' : ''}> Show Destruction
+        </label>
       </section>
     </div>`;
 
@@ -2800,6 +2833,27 @@ function viewSettings() {
     };
   }
 
+  const bindVisibility = (key, selector) => {
+    const box = $(selector);
+    if (!box) return;
+    box.onchange = async () => {
+      state.visibleFlags[key] = box.checked;
+      try {
+        await invoke('set_flag_visible', { flag: key, visible: box.checked });
+      } catch (err) {
+        toast(String(err), 'error');
+        return;
+      }
+      if (key === 'nsfw' && !box.checked && state.lib.filter) {
+        state.lib.filter.nsfw = 'any';
+      }
+      toast(`${box.checked ? 'Showing' : 'Hiding'} ${key}.`);
+    };
+  };
+  bindVisibility('nsfw', '#vis-nsfw');
+  bindVisibility('popping', '#vis-popping');
+  bindVisibility('destruction', '#vis-destruction');
+
   $('#set-backup').onclick = async () => {
     try {
       const path = await invoke('backup_database');
@@ -2945,7 +2999,10 @@ document.addEventListener('keydown', (e) => {
   if (key === 's') { e.preventDefault(); skipCurrent(); return; }
   if (/^[1-5]$/.test(key)) { e.preventDefault(); state.rate.editor.setRating(Number(key)); return; }
   const flagKeys = { n: 'nsfw', p: 'popping', d: 'destruction', f: 'deflation', i: 'inflation' };
-  if (flagKeys[key]) { e.preventDefault(); state.rate.editor.toggleFlag(flagKeys[key]); }
+  if (flagKeys[key] && flagVisible(flagKeys[key])) {
+    e.preventDefault();
+    state.rate.editor.toggleFlag(flagKeys[key]);
+  }
 });
 
 

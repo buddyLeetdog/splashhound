@@ -152,6 +152,9 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
 - **Duplicates**: click a filename in either duplicate tab to open the detail
   player for that exact copy.
 - **Tags**: rename (merging into an existing name) or delete tags in Settings.
+- **Visible fields**: Settings can hide the NSFW, Popping or Destruction flags
+  from the editor, filters, badges, bulk edit and shortcuts. Data is kept, so
+  unhiding them brings everything back.
 - **Data**: export/import tags, ratings and flags as JSON, and back up the
   database file.
 - **Scrolling**: the library loads the next page automatically when you reach

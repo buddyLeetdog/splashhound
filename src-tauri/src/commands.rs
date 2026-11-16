@@ -25,6 +25,7 @@ pub struct Bootstrap {
     pub ffmpeg_ok: bool,
     pub ffmpeg_dir: Option<String>,
     pub ffmpeg_prompt_shown: bool,
+    pub visible_flags: VisibleFlags,
     pub hash_mode: String,
     pub cache_limit_mb: u64,
     pub stats: db::Stats,
@@ -66,6 +67,11 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         cache_dir: st.cache_dir.to_string_lossy().to_string(),
         ffmpeg_ok: ff.is_some(),
         ffmpeg_prompt_shown: st.setting("ffmpeg_prompt_shown").as_deref() == Some("1"),
+        visible_flags: VisibleFlags {
+            nsfw: st.setting("show_nsfw").as_deref() != Some("0"),
+            popping: st.setting("show_popping").as_deref() != Some("0"),
+            destruction: st.setting("show_destruction").as_deref() != Some("0"),
+        },
         ffmpeg_dir: ff.map(|f| {
             f.ffmpeg
                 .parent()
@@ -861,6 +867,28 @@ pub async fn delete_trash(state: State<'_, Arc<AppState>>, id: i64) -> Result<()
 }
 
 /* --------------------------- indexing options --------------------------- */
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibleFlags {
+    pub nsfw: bool,
+    pub popping: bool,
+    pub destruction: bool,
+}
+
+#[tauri::command]
+pub async fn set_flag_visible(
+    state: State<'_, Arc<AppState>>,
+    flag: String,
+    visible: bool,
+) -> Result<(), String> {
+    if !matches!(flag.as_str(), "nsfw" | "popping" | "destruction") {
+        return Err("Unknown flag.".into());
+    }
+    state
+        .inner()
+        .set_setting(&format!("show_{flag}"), if visible { "1" } else { "0" })
+}
 
 #[tauri::command]
 pub async fn dismiss_ffmpeg_prompt(state: State<'_, Arc<AppState>>) -> Result<(), String> {
