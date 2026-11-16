@@ -84,6 +84,11 @@ Groups byte-identical files by MD5. Pick the keeper with the radio button or
 **Auto-pick keeper** (most viewed, then oldest), then move the rest to
 `<library>/_trash`. Nothing is deleted permanently.
 
+### Stats
+Collection overview: videos, reviewed share, total size and duration, never
+viewed, recently added, videos without toys or tags, trash and DNA progress,
+plus rating distribution, toy counts, creators and folder counts.
+
 ### Settings
 Library folder, scan progress/stop, ffmpeg location, database/cache/trash
 paths, hashing mode, cache limit, tag management, metadata export/backup and
@@ -155,6 +160,12 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
 - **Visible fields**: Settings can hide the NSFW, Popping or Destruction flags
   from the editor, filters, badges, bulk edit and shortcuts. Data is kept, so
   unhiding them brings everything back.
+- **Bulk duplicate cleanup**: "Keep best in all" in either Duplicates tab keeps
+  the highest-quality copy of every group and moves the rest to trash.
+- **Quick chips**: the most-used toys and tags appear as dashed one-click chips
+  under the toy/tag inputs.
+- **Discreet mode**: blurs posters, thumbnails and names until you hover; toggle
+  it in Settings or with Ctrl+H.
 - **Data**: export/import tags, ratings and flags as JSON, and back up the
   database file.
 - **Scrolling**: the library loads the next page automatically when you reach

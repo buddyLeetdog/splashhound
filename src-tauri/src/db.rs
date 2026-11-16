@@ -757,6 +757,85 @@ pub fn all_tags(conn: &Connection) -> Result<Vec<TagCount>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Overview {
+    pub toys: Vec<TagCount>,
+    pub creators: Vec<TagCount>,
+    pub ratings: Vec<i64>,
+    pub no_toys: i64,
+    pub no_tags: i64,
+    pub never_viewed: i64,
+    pub added_week: i64,
+    pub folders: Vec<FolderCount>,
+}
+
+pub fn overview(conn: &Connection, now: i64) -> Result<Overview> {
+    let toys = all_toys(conn)?;
+
+    let creators: Vec<TagCount> = {
+        let mut stmt = conn.prepare(
+            "SELECT creator, COUNT(*) FROM videos
+             WHERE missing = 0 AND creator IS NOT NULL AND TRIM(creator) <> ''
+             GROUP BY creator ORDER BY COUNT(*) DESC, creator COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TagCount {
+                name: r.get(0)?,
+                count: r.get(1)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+
+    let mut ratings = vec![0i64; 6];
+    {
+        let mut stmt =
+            conn.prepare("SELECT rating, COUNT(*) FROM videos WHERE missing = 0 GROUP BY rating")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (rating, count) = row?;
+            if (0..=5).contains(&rating) {
+                ratings[rating as usize] = count;
+            }
+        }
+    }
+
+    let no_toys: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM videos
+         WHERE missing = 0 AND id NOT IN (SELECT video_id FROM video_toys)",
+        [],
+        |r| r.get(0),
+    )?;
+    let no_tags: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM videos
+         WHERE missing = 0 AND id NOT IN (SELECT video_id FROM video_tags)",
+        [],
+        |r| r.get(0),
+    )?;
+    let never_viewed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM videos WHERE missing = 0 AND view_count = 0",
+        [],
+        |r| r.get(0),
+    )?;
+    let added_week: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM videos WHERE missing = 0 AND added_at >= ?1",
+        params![now - 7 * 24 * 3600],
+        |r| r.get(0),
+    )?;
+
+    Ok(Overview {
+        toys,
+        creators,
+        ratings,
+        no_toys,
+        no_tags,
+        never_viewed,
+        added_week,
+        folders: folders(conn)?,
+    })
+}
+
 pub fn all_toys(conn: &Connection) -> Result<Vec<TagCount>> {
     let mut stmt = conn.prepare(
         "SELECT t.name, COUNT(v.id)

@@ -11,6 +11,8 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const state = {
   boot: null,
   visibleFlags: { nsfw: true, popping: true, destruction: true },
+  discreet: false,
+  overview: null,
   media: '',
   stats: {},
   tags: [],
@@ -49,13 +51,21 @@ function flagVisible(key) {
   return true;
 }
 
-function flagHints() {
-  const parts = [];
+function flagHints() {  const parts = [];
   if (flagVisible('nsfw')) parts.push('<kbd>N</kbd> NSFW');
   if (flagVisible('popping')) parts.push('<kbd>P</kbd> popping');
   if (flagVisible('destruction')) parts.push('<kbd>D</kbd> destruction');
   parts.push('<kbd>F</kbd> deflation', '<kbd>I</kbd> inflation');
   return parts.join(' \u00b7 ');
+}
+
+function setDiscreet(enabled) {
+  state.discreet = !!enabled;
+  document.body.classList.toggle('discreet', state.discreet);
+  const box = $('#set-discreet');
+  if (box) box.checked = state.discreet;
+  invoke('set_discreet', { enabled: state.discreet }).catch(() => {});
+  toast(state.discreet ? 'Discreet mode on (Ctrl+H to toggle)' : 'Discreet mode off');
 }
 
 function esc(value) {  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
@@ -284,6 +294,8 @@ async function init() {
     const boot = await invoke('bootstrap');
     state.boot = boot;
     state.visibleFlags = boot.visibleFlags || state.visibleFlags;
+    state.discreet = !!boot.discreet;
+    document.body.classList.toggle('discreet', state.discreet);
     state.media = boot.mediaBase;
     state.stats = boot.stats;
     state.tags = boot.tags;
@@ -385,6 +397,7 @@ function navigate(view) {  closeAutocomplete();
   else if (view === 'rate') viewRate();
   else if (view === 'duplicates') viewDuplicates();
   else if (view === 'trash') viewTrash();
+  else if (view === 'stats') viewStats();
   else if (view === 'settings') viewSettings();
 }
 
@@ -393,6 +406,7 @@ function rerenderView() {
   else if (state.view === 'rate') loadRateQueue();
   else if (state.view === 'duplicates') viewDuplicates();
   else if (state.view === 'trash') viewTrash();
+  else if (state.view === 'stats') viewStats();
   else if (state.view === 'settings') viewSettings();
 }
 
@@ -1087,11 +1101,13 @@ function editorHtml(v, prefix, reviewedInitial) {
       <label>Tags</label>
       <div class="chips chips-static" id="${prefix}-tagchips"></div>
       <input class="input" id="${prefix}-taginput" placeholder="Type a tag and press Enter" style="margin-top:6px">
+      <div class="quick-labels" id="${prefix}-tagquick"></div>
     </div>
     <div class="field">
       <label>Toys</label>
       <div class="chips chips-static" id="${prefix}-toychips"></div>
       <input class="input" id="${prefix}-toyinput" placeholder="Add a toy and press Enter" style="margin-top:6px">
+      <div class="quick-labels" id="${prefix}-toyquick"></div>
     </div>
     <div class="field">
       <label>Notes</label>
@@ -1130,6 +1146,7 @@ function createEditor(root, prefix, video) {
     wrap.innerHTML = form.tags.length
       ? form.tags.map((t, i) => `<span class="chip">${esc(t)}<button class="chip-x" data-tag-i="${i}" title="Remove">\u00d7</button></span>`).join('')
       : '<span class="muted small">No tags</span>';
+    renderQuickTags();
   };
 
   const renderToys = () => {
@@ -1138,6 +1155,7 @@ function createEditor(root, prefix, video) {
     wrap.innerHTML = form.toys.length
       ? form.toys.map((t, i) => `<span class="chip toy">${esc(t)}<button class="chip-x" data-toy-i="${i}" title="Remove">\u00d7</button></span>`).join('')
       : '<span class="muted small">No toys</span>';
+    renderQuickToys();
   };
 
   $$('[data-flag]', root).forEach((btn) => {
@@ -1239,6 +1257,38 @@ function createEditor(root, prefix, video) {
       renderToys();
     }
   });
+
+  const renderQuickTags = () => {
+    const wrap = $(`#${prefix}-tagquick`, root);
+    if (!wrap) return;
+    const chosen = new Set(form.tags.map((t) => t.toLowerCase()));
+    const picks = state.tags
+      .filter((t) => !chosen.has(t.name.toLowerCase()))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+      .slice(0, 8);
+    wrap.innerHTML = picks
+      .map((t) => `<button type="button" class="chip quick" data-quick-tag="${esc(t.name)}">+ ${esc(t.name)} <span class="n">${t.count}</span></button>`)
+      .join('');
+    $$('[data-quick-tag]', wrap).forEach((b) => {
+      b.onclick = () => addTag(b.dataset.quickTag);
+    });
+  };
+
+  const renderQuickToys = () => {
+    const wrap = $(`#${prefix}-toyquick`, root);
+    if (!wrap) return;
+    const chosen = new Set(form.toys.map((t) => t.toLowerCase()));
+    const picks = state.toys
+      .filter((t) => !chosen.has(t.name.toLowerCase()))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+      .slice(0, 8);
+    wrap.innerHTML = picks
+      .map((t) => `<button type="button" class="chip quick toy" data-quick-toy="${esc(t.name)}">+ ${esc(t.name)} <span class="n">${t.count}</span></button>`)
+      .join('');
+    $$('[data-quick-toy]', wrap).forEach((b) => {
+      b.onclick = () => addToy(b.dataset.quickToy);
+    });
+  };
 
   const creatorInput = $(`#${prefix}-creator`, root);
   attachAutocomplete(creatorInput, (query) => {
@@ -1755,6 +1805,7 @@ async function viewDuplicates() {
         <p class="muted" id="dup-sub">Looking for identical files...</p>
       </div>
       <div class="head-actions">
+        <button class="btn primary" id="dup-bulk">Keep best in all</button>
         <button class="btn" id="dup-refresh">Refresh</button>
       </div>
     </header>
@@ -1764,6 +1815,7 @@ async function viewDuplicates() {
     </div>
     <div id="dup-body"><div class="empty">Loading...</div></div>`;
   $('#dup-refresh').onclick = () => renderDupsTab();
+  $('#dup-bulk').onclick = () => bulkDedupe();
   $$('.tab').forEach((tab) => {
     tab.onclick = () => {
       state.dupsTab = tab.dataset.tab;
@@ -1798,6 +1850,8 @@ function renderDups() {
   if (!body) return;
   const groups = state.dups;
   const wasted = groups.reduce((sum, g) => sum + g.wasted, 0);
+  const bulk = $('#dup-bulk');
+  if (bulk) bulk.disabled = groups.length === 0;
   if (sub) {
     sub.textContent = groups.length
       ? `${groups.length} duplicate group${groups.length === 1 ? '' : 's'} \u00b7 ${fmtSize(wasted)} recoverable`
@@ -1975,6 +2029,8 @@ function renderSimilar() {
   const list = $('#similar-list');
   if (!list) return;
   const groups = state.similar;
+  const bulk = $('#dup-bulk');
+  if (bulk) bulk.disabled = groups.length === 0;
   if (!groups.length) {
     list.innerHTML = `<div class="empty"><h2>No similar videos</h2>
       <p>No near-duplicates found among the analyzed videos.</p></div>`;
@@ -2066,6 +2122,53 @@ function similarGroupHtml(group, index) {
         <button class="btn danger" data-trash>Move others to trash</button>
       </div>
     </section>`;
+}
+
+async function bulkDedupe() {
+  const kind = state.dupsTab;
+  const groups = kind === 'exact' ? state.dups : state.similar;
+  if (!groups || !groups.length) {
+    toast('No duplicate groups in this tab.');
+    return;
+  }
+  const plans = groups
+    .map((group) => {
+      const keep = autoPick(group.videos);
+      return { group, others: group.videos.filter((v) => v.id !== keep) };
+    })
+    .filter((plan) => plan.others.length > 0);
+  if (!plans.length) {
+    toast('Nothing to remove.');
+    return;
+  }
+  const total = plans.reduce((n, plan) => n + plan.others.length, 0);
+  const ok = await confirmDialog({
+    title: `Keep the best copy in ${plans.length} group${plans.length === 1 ? '' : 's'}?`,
+    message: `The best-quality copy of each group is kept. Moving ${total} other file${total === 1 ? '' : 's'} to the trash; they can be restored from the Trash view.`,
+    okLabel: 'Move to trash',
+    danger: true,
+  });
+  if (!ok) return;
+
+  toast(`Moving ${total} file${total === 1 ? '' : 's'} to trash...`);
+  let moved = 0;
+  let failed = 0;
+  for (const plan of plans) {
+    for (const video of plan.others) {
+      try {
+        await invoke('remove_duplicate', { id: video.id });
+        moved += 1;
+      } catch (err) {
+        failed += 1;
+      }
+    }
+  }
+  toast(
+    `Moved ${moved} file${moved === 1 ? '' : 's'} to trash${failed ? `, ${failed} failed` : ''}.`,
+    failed ? 'error' : 'info',
+  );
+  await refreshMeta();
+  renderDupsTab();
 }
 
 function autoPick(videos) {
@@ -2374,6 +2477,108 @@ function renderTrash() {
   });
 }
 
+/* -------------------------------- stats --------------------------------- */
+
+async function viewStats() {
+  $('#view').innerHTML = `
+    <header class="page-head">
+      <div>
+        <h1>Stats</h1>
+        <p class="muted">Collection overview</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn" id="stats-refresh">Refresh</button>
+      </div>
+    </header>
+    <div id="stats-body"><div class="empty">Loading...</div></div>`;
+  $('#stats-refresh').onclick = () => viewStats();
+  await refreshMeta();
+  try {
+    state.overview = await invoke('overview');
+  } catch (err) {
+    toast(`Could not load stats: ${err}`, 'error');
+    return;
+  }
+  renderStats();
+}
+
+function renderStats() {
+  const data = state.overview;
+  const body = $('#stats-body');
+  if (!data || !body) return;
+  const s = state.stats || {};
+  const total = s.total || 0;
+  const pct = (n) => (total ? Math.round((100 * n) / total) : 0);
+  const cards = [
+    ['Videos', total],
+    ['Reviewed', `${s.reviewed || 0} (${pct(s.reviewed || 0)}%)`],
+    ['Size', fmtSize(s.totalSize || 0)],
+    ['Total duration', fmtDur(s.totalDurationMs || 0)],
+    ['Never viewed', data.neverViewed || 0],
+    ['Added last 7 days', data.addedWeek || 0],
+    ['Without toys', data.noToys || 0],
+    ['Without tags', data.noTags || 0],
+    ['In trash', s.trash || 0],
+    ['DNA analyzed', `${s.dnaDone || 0} / ${(s.dnaDone || 0) + (s.dnaPending || 0)}`],
+  ];
+
+  const ratingMax = Math.max(1, ...data.ratings);
+  const ratingRows = data.ratings
+    .map((count, stars) => {
+      const label = stars === 0 ? 'Unrated' : '\u2605'.repeat(stars);
+      return `<div class="rating-row">
+        <span class="rating-label">${label}</span>
+        <div class="progress grow"><div style="width:${Math.round((100 * count) / ratingMax)}%"></div></div>
+        <span class="muted small">${count}</span>
+      </div>`;
+    })
+    .join('');
+
+  const toys = data.toys
+    .slice()
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  const folders = data.folders
+    .slice()
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 30);
+
+  body.innerHTML = `
+    <div class="stat-cards">
+      ${cards.map(([label, value]) => `
+        <div class="stat-card">
+          <div class="stat-value">${value}</div>
+          <div class="stat-label">${label}</div>
+        </div>`).join('')}
+    </div>
+    <div class="settings-grid" style="margin-top:16px">
+      <section class="panel">
+        <h2>Ratings</h2>
+        ${ratingRows}
+      </section>
+      <section class="panel">
+        <h2>Toys</h2>
+        ${toys.length
+          ? `<div class="chips">${toys.map((t) => `<span class="chip toy">${esc(t.name)} <span class="n">${t.count}</span></span>`).join('')}</div>`
+          : '<p class="muted small">No toys tagged yet.</p>'}
+      </section>
+      <section class="panel">
+        <h2>Creators</h2>
+        ${data.creators.length
+          ? `<div class="tag-manager">${data.creators.slice(0, 40).map((c) => `
+              <div class="tag-row"><span class="tag-name ellipsis">${esc(c.name)}</span><span class="muted small">${c.count}</span></div>`).join('')}</div>`
+          : '<p class="muted small">No creators yet.</p>'}
+      </section>
+      <section class="panel">
+        <h2>Folders</h2>
+        ${folders.length
+          ? `<div class="tag-manager">${folders.map((f) => `
+              <div class="tag-row"><span class="tag-name ellipsis" title="${esc(f.path)}">${esc(folderLabel(f.path))}</span><span class="muted small">${f.count}</span></div>`).join('')}</div>`
+          : '<p class="muted small">No folders.</p>'}
+      </section>
+    </div>`;
+}
+
 /* ------------------------------ settings -------------------------------- */
 
 function scanPanelHtml(scan) {
@@ -2579,6 +2784,10 @@ function viewSettings() {
         <label class="check">
           <input type="checkbox" id="vis-destruction" ${state.visibleFlags.destruction ? 'checked' : ''}> Show Destruction
         </label>
+        <label class="check" style="margin-top:12px">
+          <input type="checkbox" id="set-discreet" ${state.discreet ? 'checked' : ''}> Discreet mode (blur previews and names until hover)
+        </label>
+        <p class="muted small">Toggle discreet mode anytime with Ctrl+H.</p>
       </section>
     </div>`;
 
@@ -2854,6 +3063,11 @@ function viewSettings() {
   bindVisibility('popping', '#vis-popping');
   bindVisibility('destruction', '#vis-destruction');
 
+  const discreetBox = $('#set-discreet');
+  if (discreetBox) {
+    discreetBox.onchange = () => setDiscreet(discreetBox.checked);
+  }
+
   $('#set-backup').onclick = async () => {
     try {
       const path = await invoke('backup_database');
@@ -2959,6 +3173,11 @@ function renderScanPanelOnly() {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && modalCloser) {
     modalCloser();
+    return;
+  }
+  if (e.ctrlKey && (e.key === 'h' || e.key === 'H')) {
+    e.preventDefault();
+    setDiscreet(!state.discreet);
     return;
   }
   const detailVideo = document.querySelector('#d-video');

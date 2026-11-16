@@ -26,6 +26,7 @@ pub struct Bootstrap {
     pub ffmpeg_dir: Option<String>,
     pub ffmpeg_prompt_shown: bool,
     pub visible_flags: VisibleFlags,
+    pub discreet: bool,
     pub hash_mode: String,
     pub cache_limit_mb: u64,
     pub stats: db::Stats,
@@ -72,6 +73,7 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
             popping: st.setting("show_popping").as_deref() != Some("0"),
             destruction: st.setting("show_destruction").as_deref() != Some("0"),
         },
+        discreet: st.setting("discreet").as_deref() == Some("1"),
         ffmpeg_dir: ff.map(|f| {
             f.ffmpeg
                 .parent()
@@ -888,6 +890,19 @@ pub async fn set_flag_visible(
     state
         .inner()
         .set_setting(&format!("show_{flag}"), if visible { "1" } else { "0" })
+}
+
+#[tauri::command]
+pub async fn set_discreet(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<(), String> {
+    state
+        .inner()
+        .set_setting("discreet", if enabled { "1" } else { "0" })
+}
+
+#[tauri::command]
+pub async fn overview(state: State<'_, Arc<AppState>>) -> Result<db::Overview, String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::overview(&conn, scan::now()).map_err(err)
 }
 
 #[tauri::command]

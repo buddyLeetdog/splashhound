@@ -481,3 +481,40 @@ kbd {
 .settings-grid > .panel:nth-child(8) { order: 9; }
 .settings-grid > .panel:nth-child(9) { order: 10; }
 
+
+/* ---------- quick label chips ---------- */
+.quick-labels { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.quick-labels:empty { display: none; }
+.chip.quick { background: transparent; border-style: dashed; color: var(--muted); font-size: 11px; padding: 2px 7px; }
+.chip.quick:hover { color: var(--text); border-color: #3a4856; }
+.chip.quick.toy { color: #d9c07a; }
+
+/* ---------- discreet mode ---------- */
+body.discreet .poster img,
+body.discreet .thumb img { filter: blur(16px); transition: filter 0.12s ease; }
+body.discreet .poster:hover img,
+body.discreet .thumb:hover img { filter: none; }
+body.discreet .card-title,
+body.discreet .detail-title,
+body.discreet .rate-title,
+body.discreet .file-path,
+body.discreet .fname,
+body.discreet .tag-row .tag-name,
+body.discreet .detail-right > .muted.small { filter: blur(6px); transition: filter 0.12s ease; }
+body.discreet .card-title:hover,
+body.discreet .detail-title:hover,
+body.discreet .rate-title:hover,
+body.discreet .file-path:hover,
+body.discreet .fname:hover,
+body.discreet .tag-row .tag-name:hover,
+body.discreet .detail-right > .muted.small:hover { filter: none; }
+
+/* ---------- stats ---------- */
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.stat-card { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 10px; padding: 12px 14px; }
+.stat-value { font-size: 20px; font-weight: 650; letter-spacing: -0.2px; }
+.stat-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; margin-top: 2px; }
+.rating-row { display: flex; align-items: center; gap: 10px; margin: 7px 0; }
+.rating-label { width: 72px; font-size: 12px; color: var(--muted); }
+.progress.grow { flex: 1; }
+.rating-row .muted.small { width: 46px; text-align: right; }
