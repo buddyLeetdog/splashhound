@@ -91,10 +91,10 @@ pub async fn set_root(state: State<'_, Arc<AppState>>, path: String) -> Result<S
     if !canonical.is_dir() {
         return Err("That path is not a folder.".into());
     }
-    let display = canonical.to_string_lossy().to_string();
-    st.set_setting("root", &display)?;
-    *st.root.write().unwrap() = Some(canonical);
-    Ok(display)
+    let stored = db::display_path(&canonical.to_string_lossy());
+    st.set_setting("root", &stored)?;
+    *st.root.write().unwrap() = Some(PathBuf::from(&stored));
+    Ok(stored)
 }
 
 #[tauri::command]
@@ -529,6 +529,7 @@ pub async fn set_data_dir(
             .map_err(|e| format!("Could not copy the database: {e}"))?;
         let conn = db::open(&target_copy)
             .map_err(|e| format!("Could not open the copied database: {e}"))?;
+        let _ = db::normalize_stored_paths(&conn);
         *guard = conn;
         Ok(())
     })

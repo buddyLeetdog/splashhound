@@ -223,6 +223,9 @@ pub fn run() {
                 }
             };
 
+            if let Err(err) = db::normalize_stored_paths(&conn) {
+                eprintln!("could not normalize stored paths: {err}");
+            }
             let root = db::get_setting(&conn, "root")
                 .map(PathBuf::from)
                 .filter(|p| p.is_dir());

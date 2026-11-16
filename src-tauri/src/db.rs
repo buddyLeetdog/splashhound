@@ -165,6 +165,39 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Strip the Windows verbatim prefix (`\\?\`) so paths read normally in the UI.
+pub fn display_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+/// Older builds stored canonicalized paths such as `\\?\D:\Videos\...`. Rewrite
+/// them in place (root setting and every video row) so they display cleanly and
+/// rescans match the existing rows instead of inserting duplicates.
+pub fn normalize_stored_paths(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        UPDATE OR IGNORE videos SET path = '\\' || substr(path, 9)
+          WHERE path LIKE '\\?\UNC\%';
+        UPDATE OR IGNORE videos SET path = substr(path, 5)
+          WHERE path LIKE '\\?\%';
+        DELETE FROM videos
+          WHERE path LIKE '\\?\%'
+            AND substr(path, 5) IN (SELECT path FROM videos WHERE path NOT LIKE '\\?\%');
+        UPDATE settings SET value = '\\' || substr(value, 9)
+          WHERE key = 'root' AND value LIKE '\\?\UNC\%';
+        UPDATE settings SET value = substr(value, 5)
+          WHERE key = 'root' AND value LIKE '\\?\%';
+        "#,
+    )?;
+    Ok(())
+}
+
 pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row(
         "SELECT value FROM settings WHERE key = ?1",
