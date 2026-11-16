@@ -7,6 +7,7 @@ pub mod media;
 pub mod prewarm;
 pub mod scan;
 pub mod server;
+pub mod stream;
 
 use std::{
     collections::HashMap,
@@ -111,6 +112,12 @@ impl AppState {
         root: Option<PathBuf>,
     ) -> Self {
         std::fs::create_dir_all(&cache_dir).ok();
+        {
+            // Placeholder size is part of the stored image; drop old ones when it
+            // changes so they are regenerated at the new size.
+            let version = format!("w{}", media::lowres_width());
+            if let Ok(_) = db::ensure_lowres_version(&conn, &version) {}
+        }
         let state = Self {
             db: Arc::new(Mutex::new(conn)),
             db_path: RwLock::new(db_path),
@@ -291,6 +298,7 @@ pub fn run() {
             commands::duplicates,
             commands::remove_duplicate,
             commands::trash_video,
+            commands::trash_many,
             commands::mark_viewed,
             commands::prepare_playback,
             commands::playback_status,
@@ -305,6 +313,9 @@ pub fn run() {
             commands::start_prewarm,
             commands::cancel_prewarm,
             commands::set_prewarm_enabled,
+            commands::set_native_player,
+            commands::stream_encoder,
+            commands::set_stream_window,
             commands::ensure_thumbs,
             commands::all_tags,
             commands::all_toys,

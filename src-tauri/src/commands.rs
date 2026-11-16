@@ -5,7 +5,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::{config, convert, db, dna, media, prewarm, scan, AppState, ScanStatus};
+use crate::{config, convert, db, dna, media, prewarm, scan, stream, AppState, ScanStatus};
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -31,6 +31,8 @@ pub struct Bootstrap {
     pub cache_limit_mb: u64,
     pub convert_quality: String,
     pub prewarm_posters: bool,
+    pub native_player: bool,
+    pub stream_window: u64,
     pub stats: db::Stats,
     pub tags: Vec<db::TagCount>,
     pub toys: Vec<db::TagCount>,
@@ -94,6 +96,12 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         scan: scan_state,
         convert_quality: media::quality_of(&st).as_str().to_string(),
         prewarm_posters: st.setting("prewarm_posters").as_deref() != Some("0"),
+        native_player: st.setting("native_player").as_deref() != Some("0"),
+        stream_window: st
+            .setting("stream_window")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(30)
+            .clamp(3, 120),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -272,6 +280,64 @@ pub async fn trash_video(state: State<'_, Arc<AppState>>, id: i64) -> Result<Str
     trash_by_id(&st, id).await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashManyResult {
+    pub moved: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+
+/// Bulk variant used by the library's batch selection.
+#[tauri::command]
+pub async fn trash_many(
+    state: State<'_, Arc<AppState>>,
+    ids: Vec<i64>,
+) -> Result<TrashManyResult, String> {
+    let st = state.inner().clone();
+    let mut moved = 0usize;
+    let mut errors = Vec::new();
+    for id in ids {
+        match trash_by_id(&st, id).await {
+            Ok(_) => moved += 1,
+            Err(e) => errors.push(e),
+        }
+    }
+    if moved == 0 && !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    Ok(TrashManyResult {
+        moved,
+        failed: errors.len(),
+        errors,
+    })
+}
+
+/// Move a file, retrying while another process still has it open. Windows
+/// refuses to rename a file that a decoder is reading, and handles close a
+/// moment after playback stops.
+async fn move_into_place(src: &Path, target: &Path) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 0..20 {
+        match tokio::fs::rename(src, target).await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_error = e.to_string(),
+        }
+        // Copy+delete works when only the rename is blocked (read-only sharing).
+        if attempt >= 4 {
+            if tokio::fs::copy(src, target).await.is_ok() {
+                let _ = tokio::fs::remove_file(src).await;
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+    Err(format!(
+        "could not move the file: {last_error}. It is still open in the player or being converted \
+         — stop playback and try again."
+    ))
+}
+
 /// Move a video to `<library>/_trash`, keeping its metadata for a restore.
 pub(crate) async fn trash_by_id(st: &Arc<AppState>, id: i64) -> Result<String, String> {
     let video = st.video(id).ok_or("Video not found.")?;
@@ -305,10 +371,7 @@ pub(crate) async fn trash_by_id(st: &Arc<AppState>, id: i64) -> Result<String, S
         }
     }
 
-    if tokio::fs::rename(&src, &target).await.is_err() {
-        tokio::fs::copy(&src, &target).await.map_err(err)?;
-        tokio::fs::remove_file(&src).await.map_err(err)?;
-    }
+    move_into_place(&src, &target).await?;
 
     {
         let mut conn = st.db.lock().map_err(err)?;
@@ -471,6 +534,35 @@ pub async fn set_prewarm_enabled(
     db::set_setting(&conn, "prewarm_posters", if enabled { "1" } else { "0" }).map_err(err)
 }
 
+#[tauri::command]
+pub async fn set_native_player(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::set_setting(&conn, "native_player", if enabled { "1" } else { "0" }).map_err(err)
+}
+
+/// Which encoder the built-in player will use (`None` means libx264).
+#[tauri::command]
+pub async fn stream_encoder(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
+    let ffmpeg = state.inner().ffmpeg().ok_or("ffmpeg was not found")?;
+    Ok(stream::hardware_encoder(&ffmpeg.ffmpeg).map(str::to_string))
+}
+
+#[tauri::command]
+pub async fn set_stream_window(
+    state: State<'_, Arc<AppState>>,
+    seconds: u64,
+) -> Result<u64, String> {
+    let seconds = seconds.clamp(3, 120);
+    {
+        let conn = state.inner().db.lock().map_err(err)?;
+        db::set_setting(&conn, "stream_window", &seconds.to_string()).map_err(err)?;
+    }
+    Ok(seconds)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackInfo {
@@ -479,11 +571,29 @@ pub struct PlaybackInfo {
     pub url: Option<String>,
     pub progress: f64,
     pub error: Option<String>,
+    pub stream_mime: Option<String>,
 }
 
 fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> PlaybackInfo {
     let url = format!("{}/media/{}", st.media_base(), video.id);
     let mode = video.playback.clone();
+
+    // The built-in stream player decodes anything ffmpeg can read and writes a
+    // constant frame rate, so it also fixes stuttering VFR files. Remux cases
+    // (browser codec, unusual container or audio) used to be copied into the
+    // cache first, which cost several seconds per file; they stream instead.
+    if (mode != "direct" || video.vfr) && st.setting("native_player").as_deref() != Some("0") {
+        let (_, codec) = stream::profile_for(video.width, video.height);
+        return PlaybackInfo {
+            mode: "stream".into(),
+            state: "ready".into(),
+            url: None,
+            progress: 1.0,
+            error: None,
+            stream_mime: Some(format!("video/mp4; codecs=\"{codec},mp4a.40.2\"")),
+        };
+    }
+
     if mode == "direct" {
         return PlaybackInfo {
             mode,
@@ -491,6 +601,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: Some(url),
             progress: 1.0,
             error: None,
+            stream_mime: None,
         };
     }
 
@@ -502,6 +613,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: Some(url),
             progress: 1.0,
             error: None,
+            stream_mime: None,
         };
     }
     if st.ffmpeg().is_none() {
@@ -515,6 +627,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
                  Install ffmpeg (winget install Gyan.FFmpeg) and restart the app."
                     .into(),
             ),
+            stream_mime: None,
         };
     }
     if start {
@@ -532,6 +645,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: None,
             progress: 0.0,
             error: job.error,
+            stream_mime: None,
         },
         Some(job) if job.state == "done" && cache.is_file() => PlaybackInfo {
             mode,
@@ -539,6 +653,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: Some(url),
             progress: 1.0,
             error: None,
+            stream_mime: None,
         },
         Some(job) if job.state == "done" => PlaybackInfo {
             mode,
@@ -546,6 +661,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: None,
             progress: -1.0,
             error: None,
+            stream_mime: None,
         },
         Some(job) => PlaybackInfo {
             mode,
@@ -553,6 +669,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: None,
             progress: job.progress,
             error: None,
+            stream_mime: None,
         },
         None => PlaybackInfo {
             mode,
@@ -560,6 +677,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             url: None,
             progress: -1.0,
             error: None,
+            stream_mime: None,
         },
     }
 }

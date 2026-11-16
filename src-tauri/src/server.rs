@@ -11,7 +11,7 @@ use axum::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 
-use crate::{db, media, AppState};
+use crate::{db, media, stream, AppState};
 
 /// Local HTTP server used only for media streaming (range requests) and
 /// generated thumbnails. Data flows through Tauri IPC instead.
@@ -22,6 +22,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/thumb/{id}/{index}", get(thumb_handler))
         .route("/poster/{id}", get(poster_handler))
         .route("/lowres/{id}", get(lowres_handler))
+        .route("/stream/{id}", get(stream::upgrade))
         .with_state(state)
 }
 
@@ -80,7 +81,16 @@ async fn poster_handler(
     let index = (media::THUMB_COUNT / 2).min(media::THUMB_COUNT - 1);
     let (is_head, range) = request_parts(&req);
     match media::ensure_thumb(&state, &video, index).await {
-        Some(path) => image_response(is_head, range, &path).await,
+        Some(path) => {
+            // Keep the database placeholder in sync with the cached poster. Do it
+            // in the background so serving the poster is not delayed.
+            let bg_state = state.clone();
+            let bg_video = video.clone();
+            tauri::async_runtime::spawn(async move {
+                media::ensure_lowres(&bg_state, &bg_video).await;
+            });
+            image_response(is_head, range, &path).await
+        }
         None => (StatusCode::NOT_FOUND, "no poster").into_response(),
     }
 }

@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS videos (
   fps         REAL,
   vfr         INTEGER NOT NULL DEFAULT 0,
   thumb_small BLOB,
+  dna_failed  INTEGER NOT NULL DEFAULT 0,
   has_audio   INTEGER NOT NULL DEFAULT 0,
   md5         TEXT,
   creator     TEXT,
@@ -220,6 +221,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     ensure_column(&conn, "videos", "fps", "REAL")?;
     ensure_column(&conn, "videos", "vfr", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(&conn, "videos", "thumb_small", "BLOB")?;
+    ensure_column(&conn, "videos", "dna_failed", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(conn)
 }
 
@@ -455,6 +457,21 @@ pub fn get_video(conn: &Connection, id: i64) -> Result<Option<VideoDto>> {
         attach_tags(conn, std::slice::from_mut(v))?;
     }
     Ok(v)
+}
+
+/// Make the placeholders match the current size. Older ones are dropped so they
+/// are regenerated from the cached posters (lazily on view, or by the prewarm
+/// job), which keeps the stored image size in sync with the code.
+pub fn ensure_lowres_version(conn: &Connection, version: &str) -> Result<bool> {
+    if get_setting(conn, "lowres_version").as_deref() == Some(version) {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE videos SET thumb_small = NULL WHERE thumb_small IS NOT NULL",
+        [],
+    )?;
+    set_setting(conn, "lowres_version", version)?;
+    Ok(true)
 }
 
 /// Store the tiny placeholder image shown while the real poster loads.
@@ -800,6 +817,9 @@ pub struct Stats {
     pub hash_skipped: i64,
     pub dna_done: i64,
     pub dna_pending: i64,
+    pub dna_groups: i64,
+    pub dna_failed: i64,
+    pub old_codecs: i64,
     pub trash: i64,
 }
 
@@ -847,10 +867,18 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
     s.dna_done = conn.query_row("SELECT COUNT(*) FROM video_dna", [], |r| r.get(0))?;
     s.dna_pending = conn.query_row(
         "SELECT COUNT(*) FROM videos
-         WHERE missing = 0 AND id NOT IN (SELECT video_id FROM video_dna)",
+         WHERE missing = 0 AND dna_failed = 0
+           AND id NOT IN (SELECT video_id FROM video_dna)",
         [],
         |r| r.get(0),
     )?;
+    s.dna_groups = similar_groups(conn)?.len() as i64;
+    s.dna_failed = conn.query_row(
+        "SELECT COUNT(*) FROM videos WHERE missing = 0 AND dna_failed = 1",
+        [],
+        |r| r.get(0),
+    )?;
+    s.old_codecs = old_codec_count(conn)?;
     Ok(s)
 }
 
@@ -1730,13 +1758,58 @@ pub fn dna_pending(
 ) -> Result<Vec<(i64, String, Option<i64>, Option<i64>, Option<i64>)>> {
     let mut stmt = conn.prepare(
         "SELECT v.id, v.path, v.duration_ms, v.width, v.height FROM videos v
-         WHERE v.missing = 0 AND v.id NOT IN (SELECT video_id FROM video_dna)
+         WHERE v.missing = 0 AND v.dna_failed = 0
+           AND v.id NOT IN (SELECT video_id FROM video_dna)
          ORDER BY v.size ASC",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Files that cannot be sampled (no video stream, broken data) are remembered so
+/// every DNA run does not retry them; clearing the flag retries them.
+pub fn mark_dna_failed(conn: &Connection, id: i64, failed: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE videos SET dna_failed = ?2 WHERE id = ?1",
+        params![id, if failed { 1 } else { 0 }],
+    )?;
+    Ok(())
+}
+
+pub fn reset_dna_failures(conn: &Connection) -> Result<()> {
+    conn.execute("UPDATE videos SET dna_failed = 0 WHERE dna_failed <> 0", [])?;
+    Ok(())
+}
+
+/// Number of videos that need conversion for playback or have irregular timing.
+pub fn old_codec_count(conn: &Connection) -> Result<i64> {
+    let mut stmt =
+        conn.prepare("SELECT ext, vcodec, acodec, pix_fmt, vfr FROM videos WHERE missing = 0")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, i64>(4)?,
+        ))
+    })?;
+    let mut count = 0i64;
+    for row in rows {
+        let (ext, vcodec, acodec, pix_fmt, vfr) = row?;
+        let transcode = crate::media::playback_str(
+            &ext,
+            vcodec.as_deref(),
+            acodec.as_deref(),
+            pix_fmt.as_deref(),
+        ) == "transcode";
+        if vfr != 0 || transcode {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 pub fn set_dna(

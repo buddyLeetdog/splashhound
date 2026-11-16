@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 /* ---------------------------------------------------------------------------
  * Splashhound frontend - plain JS against the Tauri command bridge.
@@ -138,7 +138,11 @@ function refreshChrome() {
   const s = state.stats || {};
   $('#count-library').textContent = s.total ?? 0;
   $('#count-rate').textContent = s.unreviewed ?? 0;
-  $('#count-dups').textContent = s.duplicates ?? 0;
+  // Hash duplicates / near-duplicate (DNA) groups.
+  $('#count-dups').textContent = `${s.duplicates ?? 0} / ${s.dnaGroups ?? 0}`;
+  $('#count-dups').title = `${s.duplicates ?? 0} identical (MD5) groups / ${s.dnaGroups ?? 0} similar (Video DNA) groups`;
+  const oldCount = $('#count-old');
+  if (oldCount) oldCount.textContent = s.oldCodecs ?? 0;
   $('#count-trash').textContent = s.trash ?? 0;
   const pct = s.total ? Math.round((100 * (s.reviewed || 0)) / s.total) : 0;
   $('#side-progress').style.width = `${pct}%`;
@@ -300,7 +304,7 @@ async function init() {
     // Ask the webview which codecs beyond Chromium's built-in set it can decode.
     // HEVC needs the Windows "HEVC Video Extensions" package (or an OEM
     // equivalent) plus a GPU that supports it, so it has to be detected, not
-    // assumed — otherwise those files would be converted for nothing.
+    // assumed � otherwise those files would be converted for nothing.
     const probe = document.createElement('video');
     const canPlay = (codec) =>
       probe.canPlayType(`video/mp4; codecs="${codec}"`) !== '' ||
@@ -530,6 +534,7 @@ function viewLibrary() {
       <button class="btn tiny" id="bulk-all">Select all loaded</button>
       <button class="btn tiny" id="bulk-clear">Clear</button>
       <button class="btn primary tiny" id="bulk-edit">Edit selection...</button>
+      <button class="btn tiny danger" id="bulk-trash" disabled>Move to trash</button>
     </div>
 
     <div class="grid" id="lib-grid"></div>
@@ -616,6 +621,7 @@ function viewLibrary() {
     updateBulkBar();
   });
   $('#bulk-edit').addEventListener('click', openBulkEditor);
+  $('#bulk-trash').addEventListener('click', trashSelection);
   $('#lib-rate-folder').addEventListener('click', () => {
     state.rate.folder = f.folder;
     navigate('rate');
@@ -682,6 +688,37 @@ function updateBulkBar() {
   bar.classList.toggle('hidden', count === 0);
   const label = $('#bulk-count');
   if (label) label.textContent = `${count} selected`;
+  const trash = $('#bulk-trash');
+  if (trash) trash.disabled = count === 0;
+}
+
+/** Bulk "move selected to trash" from the library batch bar. */
+async function trashSelection() {
+  const ids = [...state.lib.selected];
+  if (!ids.length) return;
+  const ok = await confirmDialog({
+    title: `Move ${ids.length} video${ids.length === 1 ? '' : 's'} to trash?`,
+    message: `They will be moved to ${state.boot?.trashDir || 'the _trash folder'} and can be restored from the Trash view.`,
+    okLabel: 'Move to trash',
+    danger: true,
+  });
+  if (!ok) return;
+  await releasePlayback();
+  try {
+    const res = await invoke('trash_many', { ids });
+    state.lib.selected.clear();
+    const failed = res.failed || 0;
+    toast(
+      `Moved ${res.moved} to trash${failed ? `, ${failed} failed` : ''}.`,
+      failed ? 'error' : 'info',
+    );
+    if (failed && res.errors?.length) console.warn(res.errors.join('\n'));
+    await refreshMeta();
+    loadLibrary(true);
+    updateBulkBar();
+  } catch (err) {
+    toast(String(err), 'error');
+  }
 }
 
 async function openBulkEditor() {
@@ -938,7 +975,7 @@ async function loadLibrary(reset) {
     grid.innerHTML = '';
   } else if (moreButton) {
     moreButton.disabled = true;
-    moreButton.textContent = 'Loading…';
+    moreButton.textContent = 'Loading�';
   }
   state.lib.loading = true;
   grid.classList.add('loading');
@@ -995,10 +1032,16 @@ function renderLibraryGrid() {
   }
 
   grid.innerHTML = items.map(cardHtml).join('');
-  $$('.poster img', grid).forEach((img) => {
+  attachPosterSwap(grid);
+}
+
+/**
+ * Cards and duplicate rows show the tiny placeholder first and swap in the real
+ * poster once it is decoded (and hide broken ones).
+ */
+function attachPosterSwap(root) {
+  $$('img[data-poster]', root).forEach((img) => {
     img.addEventListener('error', () => img.classList.add('broken'));
-    // Placeholder first, then swap in the real poster as soon as it is decoded
-    // (which also covers the first-generation cost).
     const poster = img.dataset.poster;
     if (!poster) return;
     const pre = new Image();
@@ -1430,10 +1473,568 @@ function createEditor(root, prefix, video) {
   };
 }
 
+/* --------------------------- stream player ------------------------------ */
+
+/**
+ * Built-in player for files the webview cannot decode (and for VFR files).
+ * ffmpeg decodes and re-encodes to a fragmented MP4 which is appended to a
+ * MediaSource, so codec coverage is ffmpeg's, the frame rate is constant, and
+ * audio stays in sync.
+ */
+let streamPlayer = null;
+
+function stopStreamPlayer() {
+  if (streamPlayer) {
+    streamPlayer.stop();
+    streamPlayer = null;
+  }
+}
+
+/**
+ * Open the stream before the player element exists, so ffmpeg starts while the
+ * detail view is still being rendered. Returns a handle that `playStream` adopts.
+ */
+function openStreamSocket(video, startSec = 0) {
+  const handle = { ws: null, queue: [], receivedBytes: 0, closed: false };
+  try {
+    const url = state.media.replace(/^http/, 'ws') + `/stream/${video.id}?t=${startSec.toFixed(2)}`;
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (event) => {
+      if (typeof event.data === 'string') return;
+      handle.queue.push(new Uint8Array(event.data));
+      handle.receivedBytes += event.data.byteLength;
+    };
+    ws.onerror = () => {
+      handle.closed = true;
+    };
+    ws.onclose = () => {
+      handle.closed = true;
+    };
+    handle.ws = ws;
+  } catch (err) {
+    handle.closed = true;
+  }
+  return handle;
+}
+
+function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, warm = null) {
+  stopStreamPlayer();
+  const token = state.playerToken;
+  const start = Math.max(0, startSec || 0);
+  const duration = Math.max(0, (video.durationMs || 0) / 1000);
+  const base = start;
+  const wsUrl = state.media.replace(/^http/, 'ws') + `/stream/${video.id}?t=${start.toFixed(2)}`;
+
+  videoEl.pause();
+  videoEl.removeAttribute('src');
+  videoEl.load();
+
+  const ms = new MediaSource();
+  const objectUrl = URL.createObjectURL(ms);
+  videoEl.src = objectUrl;
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = '<div class="spinner"></div><div>Starting player...</div>';
+
+  let ws = null;
+  let source = null;
+  let stopped = false;
+  let started = false;
+  let creditTimer = null;
+  let receivedBytes = 0;
+  let queue = [];
+  let endSignalled = false;
+  let finished = false;
+
+  const fail = (message) => {
+    if (freeze) freeze.remove();
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `<div class="player-error">${esc(message)}</div>`;
+  };
+
+  /** Show the end state once the buffered tail has actually played out. */
+  const showFinished = () => {
+    if (finished || stopped) return;
+    finished = true;
+    if (creditTimer) clearInterval(creditTimer);
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = '<div class="muted">Playback finished</div>';
+  };
+
+  /**
+   * The decoder always runs ahead of the playhead, so its end arrives while up
+   * to a window of video is still buffered. Close the MediaSource and let the
+   * element play that tail; "finished" is shown when it really ends.
+   */
+  const finishWhenDrained = () => {
+    if (stopped || !source) return;
+    if (queue.length || source.updating) {
+      setTimeout(finishWhenDrained, 120);
+      return;
+    }
+    try {
+      if (ms.readyState === 'open') ms.endOfStream();
+    } catch (err) {
+      /* already closed */
+    }
+    // Safety net: if "ended" never fires (e.g. the tail is shorter than the
+    // buffer), stop waiting after the remaining audio would have played.
+    const remaining = videoEl.buffered.length
+      ? Math.max(0, videoEl.buffered.end(videoEl.buffered.length - 1) - videoEl.currentTime)
+      : 0;
+    setTimeout(showFinished, Math.max(500, remaining * 1000 + 1200));
+  };
+
+  const pump = () => {
+    if (!source || source.updating || !queue.length) return;
+    const chunk = queue.shift();
+    try {
+      source.appendBuffer(chunk);
+    } catch (err) {
+      // Not enough buffer space yet: retry after the next updateend.
+      queue.unshift(chunk);
+    }
+  };
+
+  ms.addEventListener('sourceopen', () => {
+    try {
+      source = ms.addSourceBuffer(mime);
+    } catch (err) {
+      fail(`This player cannot use ${mime}: ${err}`);
+      return;
+    }
+    source.addEventListener('updateend', () => {
+      if (!started && videoEl.buffered.length) {
+        started = true;
+        const begin = videoEl.buffered.start(0);
+        if (begin > 0.2) videoEl.currentTime = begin;
+        videoEl.play().catch(() => {});
+        overlay.classList.add('hidden');
+        if (freeze) freeze.remove();
+      }
+      pump();
+      trimBehind();
+    });
+
+    // Adopt the socket that was opened while the dialog was rendering, or open
+    // one now. Either way the same handlers drive it.
+    const adopt = (socket, initialQueue, initialBytes) => {
+      ws = socket;
+      ws.binaryType = 'arraybuffer';
+      if (initialQueue) {
+        queue = initialQueue;
+        receivedBytes = initialBytes || 0;
+      }
+      ws.onmessage = (event) => {
+        if (stopped || token !== state.playerToken) return;
+        if (typeof event.data === 'string') {
+          let payload = null;
+          try {
+            payload = JSON.parse(event.data);
+          } catch (err) {
+            payload = null;
+          }
+          if (payload && payload.eof) {
+            endSignalled = true;
+            finishWhenDrained();
+            return;
+          }
+          fail(event.data);
+          return;
+        }
+        queue.push(new Uint8Array(event.data));
+        receivedBytes += event.data.byteLength;
+        pump();
+      };
+      ws.onclose = () => {
+        if (stopped || token !== state.playerToken) return;
+        if (endSignalled) {
+          // The buffer still has to play out; finishWhenDrained handles the UI.
+          finishWhenDrained();
+          return;
+        }
+        if (videoEl.readyState >= 2) {
+          showFinished();
+        } else {
+          fail('The decoder stopped before producing video.');
+        }
+      };
+      ws.onerror = () => {
+        if (!stopped) fail('Could not connect to the built-in player.');
+      };
+    };
+
+    if (warm && !warm.closed && warm.ws && warm.ws.readyState !== WebSocket.CLOSED) {
+      adopt(warm.ws, warm.queue, warm.receivedBytes);
+      warm = null;
+      pump();
+    } else {
+      if (warm) {
+        try { warm.ws.close(); } catch (err) { /* ignore */ }
+        warm = null;
+      }
+      adopt(new WebSocket(wsUrl), null, 0);
+    }
+    // Tell the server how far ahead we are, so it can run ahead of realtime and
+    // pause when the buffer is full. Seeks inside that buffer need no restart.
+    creditTimer = setInterval(() => {
+      if (stopped || !ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        // Count queued bytes as "ahead" too: the server writes faster than MSE
+        // appends, so the buffered time alone under-reports what is in flight.
+        let queued = 0;
+        for (let i = 0; i < queue.length; i += 1) queued += queue[i].length;
+        const mediaEnd = videoEl.buffered.length
+          ? videoEl.buffered.end(videoEl.buffered.length - 1)
+          : 0;
+        const bytesPerSecond = mediaEnd > 0.5 ? receivedBytes / mediaEnd : 0;
+        const queuedMs = bytesPerSecond > 0 ? (queued / bytesPerSecond) * 1000 : 0;
+        ws.send(JSON.stringify({ ahead: Math.round(bufferedAhead() + queuedMs) }));
+        // Keep the history bounded even when the decoder is paused on a full
+        // buffer and no appends (updateend) are happening.
+        trimBehind();
+      } catch (err) {
+        /* ignore */
+      }
+    }, 300);
+  });
+
+  // Seeking outside the buffered range starts a new decoder at that position.
+  // The native controls cannot express that (MediaSource clamps seeks to the
+  // buffered ranges), so the stream player draws its own bar.
+  const wrap = videoEl.closest('.player-wrap');
+  let controls = null;
+  let rangeEl = null;
+  let nowEl = null;
+  let volBtn = null;
+  let playing = false;
+  let pendingTarget = null;
+  let seekTimer = null;
+  // Declared here so `stop()` can detach them; they are assigned below.
+  let clickTimer = null;
+  let onVideoClick = null;
+  let onVideoDoubleClick = null;
+
+  const fmt = (s) => {
+    const total = Math.max(0, Math.floor(s || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const sec = total % 60;
+    return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+             : `${m}:${String(sec).padStart(2, '0')}`;
+  };
+
+  const clamp = (t) => {
+    // Stop one second before the end: the decoder gets nothing from a position
+    // past the last frame and the picture would stay frozen on the held frame.
+    const max = duration > 2 ? duration - 1 : duration || t;
+    return Math.max(0, Math.min(t, max));
+  };
+
+  // MediaSource keeps everything that has been played until Chromium's quota
+  // forces it out (~150 MB here), so trim the history ourselves: the window is
+  // kept ahead, and the same amount behind for quick seeks back.
+  const windowSec = Math.max(3, Math.min(120, state.boot?.streamWindow || 30));
+  const trimBehind = () => {
+    if (!source || source.updating || !videoEl.buffered.length) return;
+    const keepBack = Math.max(8, Math.min(windowSec, 60));
+    const start = videoEl.buffered.start(0);
+    const cut = videoEl.currentTime - keepBack;
+    if (cut > start + 1) {
+      try {
+        source.remove(start, cut);
+      } catch (err) {
+        /* ignore: the next updateend retries */
+      }
+    }
+  };
+
+  /** Seconds of video already decoded ahead of the playhead. */
+  const bufferedAhead = () => {
+    const ranges = videoEl.buffered;
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (videoEl.currentTime >= ranges.start(i) - 0.1 && videoEl.currentTime <= ranges.end(i)) {
+        return Math.max(0, (ranges.end(i) - videoEl.currentTime) * 1000);
+      }
+    }
+    return 0;
+  };
+
+  /** Seek inside the buffered range without restarting the decoder. */
+  const seekWithinBuffer = (target) => {
+    const offset = target - base;
+    const ranges = videoEl.buffered;
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (offset >= ranges.start(i) + 0.25 && offset <= ranges.end(i) - 0.25) {
+        videoEl.currentTime = offset;
+        videoEl.play().catch(() => {});
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const paint = () => {
+    if (!rangeEl) return;
+    // Each decoder run starts its own timeline at zero, so the file position is
+    // the offset this run was started at plus the element's clock.
+    const pos = pendingTarget !== null ? pendingTarget : base + (videoEl.currentTime || 0);
+    rangeEl.value = String(duration ? Math.round((pos / duration) * 1000) : 0);
+    if (nowEl) nowEl.textContent = fmt(pos);
+  };
+
+  const paintVolume = () => {
+    if (!volBtn) return;
+    const level = videoEl.muted ? 0 : videoEl.volume;
+    volBtn.textContent = level === 0 ? '\u{1F507}' : level < 0.5 ? '\u{1F509}' : '\u{1F50A}';
+    volBtn.title = `Mute (${Math.round(level * 100)}%)`;
+  };
+
+  const toggleFullscreen = () => {
+    if (!wrap) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      wrap.requestFullscreen().catch(() => {});
+    }
+  };
+
+  // The video element has no intrinsic size until the new stream sends its
+  // first frames, which made the player box collapse to ~150 px on every
+  // restart. Pin the box to the source aspect ratio instead.
+  const applyBoxSize = () => {
+    if (!wrap) return;
+    if (document.fullscreenElement) {
+      wrap.style.height = '';
+      return;
+    }
+    if (!video.width || !video.height) return;
+    const width = wrap.clientWidth;
+    if (!width) return;
+    const cap = wrap.classList.contains('detail-player') ? 0.52 : 0.64;
+    const height = Math.min(width * (video.height / video.width), window.innerHeight * cap);
+    wrap.style.height = `${Math.round(height)}px`;
+  };
+  const onFullscreenChange = () => applyBoxSize();
+  const onWindowResize = () => applyBoxSize();
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  window.addEventListener('resize', onWindowResize);
+  applyBoxSize();
+
+  /** Freeze the current frame so a seek does not flash black while the new
+   *  decoder starts. */
+  const captureFrame = () => {
+    if (!wrap || !videoEl.videoWidth) return null;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.className = 'seek-freeze';
+      canvas.width = videoEl.videoWidth;
+      canvas.height = videoEl.videoHeight;
+      canvas.getContext('2d').drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      wrap.appendChild(canvas);
+      return canvas;
+    } catch (err) {
+      return null;
+    }
+  };
+
+  const startAt = (target) => {
+    const freezeFrame = captureFrame();
+    stopStreamPlayer();
+    playStream(videoEl, overlay, video, mime, clamp(target), freezeFrame);
+  };
+
+  const scheduleSeek = () => {
+    if (seekTimer) clearTimeout(seekTimer);
+    // Coalesce repeated arrow presses / scrubbing into one decoder start.
+    seekTimer = setTimeout(() => {
+      seekTimer = null;
+      const target = pendingTarget;
+      pendingTarget = null;
+      if (target !== null) startAt(target);
+    }, 90);
+    paint();
+  };
+
+  if (wrap) {
+    videoEl.controls = false;
+    controls = document.createElement('div');
+    controls.className = 'stream-controls';
+    controls.innerHTML = `
+      <button class="sc-play" title="Play / pause (Space)">\u23f8</button>
+      <span class="sc-now">0:00</span>
+      <input class="sc-range" type="range" min="0" max="1000" value="0" step="1" title="Seek">
+      <span class="sc-total">${fmt(duration)}</span>
+      <button class="sc-vol" title="Mute (M)">\u{1F50A}</button>
+      <button class="sc-full" title="Fullscreen (F11 or double-click)">\u26f6</button>
+      <span class="sc-badge" title="Decoded by the built-in player">stream</span>`;
+    wrap.appendChild(controls);
+    rangeEl = $('.sc-range', controls);
+    nowEl = $('.sc-now', controls);
+    volBtn = $('.sc-vol', controls);
+    const playBtn = $('.sc-play', controls);
+    playBtn.onclick = () => {
+      if (videoEl.paused) { videoEl.play().catch(() => {}); } else { videoEl.pause(); }
+    };
+    volBtn.onclick = () => {
+      videoEl.muted = !videoEl.muted;
+      paintVolume();
+    };
+    $('.sc-full', controls).onclick = toggleFullscreen;
+    // Click to pause/play, like the standard player; a double click must not
+    // toggle twice on its way to fullscreen.
+    onVideoClick = () => {
+      if (clickTimer) return;
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        if (videoEl.paused) videoEl.play().catch(() => {});
+        else videoEl.pause();
+      }, 220);
+    };
+    onVideoDoubleClick = (event) => {
+      event.preventDefault();
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+      }
+      toggleFullscreen();
+    };
+    videoEl.classList.add('stream-video');
+    videoEl.addEventListener('click', onVideoClick);
+    videoEl.addEventListener('dblclick', onVideoDoubleClick);
+    const setButton = () => {
+      playing = !videoEl.paused;
+      playBtn.textContent = playing ? '\u23f8' : '\u25b6';
+    };
+    videoEl.addEventListener('play', setButton);
+    videoEl.addEventListener('pause', setButton);
+    videoEl.addEventListener('timeupdate', paint);
+    videoEl.addEventListener('ended', showFinished);
+    // Drag: preview the position; release: reconnect there.
+    rangeEl.addEventListener('input', () => {
+      if (nowEl && duration) nowEl.textContent = fmt((Number(rangeEl.value) / 1000) * duration);
+    });
+    rangeEl.addEventListener('change', () => {
+      if (!duration) return;
+      pendingTarget = clamp((Number(rangeEl.value) / 1000) * duration);
+      scheduleSeek();
+    });
+    setButton();
+    paintVolume();
+    paint();
+  }
+
+  const onSeeking = () => {
+    if (stopped || pendingTarget !== null || !videoEl.buffered.length) return;
+    const t = videoEl.currentTime;
+    const ranges = videoEl.buffered;
+    let inside = false;
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (t >= ranges.start(i) + 0.5 && t <= ranges.end(i) - 0.2) { inside = true; break; }
+    }
+    if (!inside) {
+      startAt(t);
+    }
+  };
+  videoEl.addEventListener('seeking', onSeeking);
+
+  streamPlayer = {
+    /** Jump to an absolute position (seconds). */
+    seek(seconds) {
+      const target = clamp(seconds);
+      if (seekWithinBuffer(target)) {
+        pendingTarget = null;
+        paint();
+        return;
+      }
+      pendingTarget = target;
+      scheduleSeek();
+    },
+    /** Relative seek, counted from a pending jump if there is one. */
+    seekBy(delta) {
+      const from = pendingTarget !== null ? pendingTarget : base + (videoEl.currentTime || 0);
+      const target = clamp(from + delta);
+      if (seekWithinBuffer(target)) {
+        pendingTarget = null;
+        paint();
+        return;
+      }
+      pendingTarget = target;
+      scheduleSeek();
+    },
+    position() {
+      return pendingTarget !== null ? pendingTarget : base + (videoEl.currentTime || 0);
+    },
+    toggle() {
+      if (videoEl.paused) videoEl.play().catch(() => {}); else videoEl.pause();
+    },
+    volume(delta) {
+      videoEl.muted = false;
+      videoEl.volume = Math.max(0, Math.min(1, videoEl.volume + delta));
+      paintVolume();
+    },
+    mute() {
+      videoEl.muted = !videoEl.muted;
+      paintVolume();
+    },
+    fullscreen: toggleFullscreen,
+    stop() {
+      stopped = true;
+      if (seekTimer) clearTimeout(seekTimer);
+      if (clickTimer) clearTimeout(clickTimer);
+      if (creditTimer) clearInterval(creditTimer);
+      videoEl.removeEventListener('seeking', onSeeking);
+      videoEl.removeEventListener('ended', showFinished);
+      if (onVideoClick) videoEl.removeEventListener('click', onVideoClick);
+      if (onVideoDoubleClick) videoEl.removeEventListener('dblclick', onVideoDoubleClick);
+      videoEl.classList.remove('stream-video');
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      window.removeEventListener('resize', onWindowResize);
+      if (freeze) freeze.remove();
+      if (wrap) wrap.style.height = '';
+      if (controls) controls.remove();
+      videoEl.controls = true;
+      if (ws) { try { ws.close(); } catch {} }
+      URL.revokeObjectURL(objectUrl);
+      videoEl.pause();
+      videoEl.removeAttribute('src');
+      videoEl.load();
+    },
+  };
+
+  invoke('mark_viewed', { id: video.id }).catch(() => {});
+}
+
 /* ------------------------------ player ---------------------------------- */
+
+/**
+ * Let go of files before moving them. The built-in player's ffmpeg and the
+ * browser's media reader keep them open, and Windows refuses to move a file that
+ * another process is decoding.
+ */
+async function releasePlayback() {
+  stopStreamPlayer();
+  ['#d-video', '#r-video'].forEach((selector) => {
+    const el = document.querySelector(selector);
+    if (!el) return;
+    el.pause();
+    el.removeAttribute('src');
+    el.load();
+  });
+  await sleep(300);
+}
+
+/** What will actually play the file: the built-in player handles anything that
+ *  is not directly playable by the webview. */
+function playbackText(v) {
+  const native = state.boot?.nativePlayer;
+  if (native && (v.playback !== 'direct' || v.vfr)) return 'stream (built-in player)';
+  return v.playback;
+}
 
 function playVideo(videoEl, overlay, video, onReady) {
   const token = ++state.playerToken;
+  stopStreamPlayer();
   state.rate.video = video;
   videoEl.pause();
   videoEl.removeAttribute('src');
@@ -1442,9 +2043,20 @@ function playVideo(videoEl, overlay, video, onReady) {
   overlay.innerHTML = '<div class="spinner"></div><div>Preparing...</div>';
 
   (async () => {
+    // Start the decoder immediately if the built-in player is going to be used;
+    // it runs while the dialog renders, so the first frame is ready sooner.
+    const willStream = (video.playback === 'transcode' || video.vfr) && state.boot?.nativePlayer;
+    let warm = willStream ? openStreamSocket(video, 0) : null;
+    const dropWarm = () => {
+      if (warm) {
+        try { warm.ws.close(); } catch (err) { /* ignore */ }
+        warm = null;
+      }
+    };
     try {
       let info = await invoke('prepare_playback', { id: video.id });
       while (token === state.playerToken && (info.state === 'working' || info.state === 'queued')) {
+        dropWarm();
         const pct = info.progress >= 0 ? Math.round(info.progress * 100) : null;
         overlay.innerHTML = `
           <div class="spinner"></div>
@@ -1455,7 +2067,17 @@ function playVideo(videoEl, overlay, video, onReady) {
         if (token !== state.playerToken) return;
         info = await invoke('playback_status', { id: video.id });
       }
-      if (token !== state.playerToken) return;
+      if (token !== state.playerToken) {
+        dropWarm();
+        return;
+      }
+      if (info.mode === 'stream') {
+        playStream(videoEl, overlay, video, info.streamMime, 0, null, warm);
+        warm = null;
+        if (onReady) onReady();
+        return;
+      }
+      dropWarm();
       if (info.state !== 'ready' || !info.url) {
         overlay.classList.remove('hidden');
         overlay.innerHTML = `<div class="player-error">${esc(info.error || 'Playback failed.')}</div>`;
@@ -1467,6 +2089,7 @@ function playVideo(videoEl, overlay, video, onReady) {
       if (onReady) onReady();
       videoEl.play().catch(() => {});
     } catch (err) {
+      dropWarm();
       if (token === state.playerToken) {
         overlay.classList.remove('hidden');
         overlay.innerHTML = `<div class="player-error">${esc(String(err))}</div>`;
@@ -1491,8 +2114,13 @@ async function loadThumbs(video, container, videoEl) {
       </button>`).join('');
     $$('.thumb', container).forEach((btn) => {
       btn.onclick = () => {
+        const t = Number(btn.dataset.t);
+        if (streamPlayer) {
+          streamPlayer.seek(t);
+          return;
+        }
         if (!videoEl) return;
-        videoEl.currentTime = Number(btn.dataset.t);
+        videoEl.currentTime = t;
         videoEl.play().catch(() => {});
       };
     });
@@ -1526,7 +2154,7 @@ function detailRightHtml(v, ids, index) {
       <dt>Resolution</dt><dd>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</dd>
       <dt>Frame rate</dt><dd>${v.fps ? `${fmtFps(v.fps)}${v.vfr ? ' <span class="warn-inline">(variable)</span>' : ''}` : '-'}</dd>
       <dt>Codecs</dt><dd>${esc(v.vcodec || '?')} / ${esc(v.acodec || 'no audio')}</dd>
-      <dt>Playback</dt><dd>${esc(v.playback)}</dd>
+      <dt>Playback</dt><dd>${esc(playbackText(v))}</dd>
       <dt>MD5</dt><dd class="mono">${esc(v.md5 || 'not hashed yet')}</dd>
       <dt>Views</dt><dd>${v.viewCount}</dd>
       <dt>Added</dt><dd>${fmtDate(v.addedAt)}</dd>
@@ -1573,6 +2201,7 @@ async function openDetail(id, options = {}) {
     </div>`, {
     className: 'wide',
     onClose() {
+      stopStreamPlayer();
       state.detail = null;
       state.playerToken += 1;
     },
@@ -1622,6 +2251,7 @@ function mountDetail(v, ids, index, root, close, fullscreen = false) {
       return;
     }
     try {
+      await releasePlayback();
       await invoke('trash_video', { id: v.id });
       state.detail = null;
       close();
@@ -1708,6 +2338,7 @@ async function viewRate() {
 }
 
 function stopRatePlayer() {
+  stopStreamPlayer();
   const videoEl = $('#r-video');
   if (videoEl) {
     videoEl.pause();
@@ -1779,7 +2410,7 @@ function renderRateCurrent() {
           <dt>Size</dt><dd>${fmtSize(v.size)}</dd>
           <dt>Resolution</dt><dd>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</dd>
           <dt>Frame rate</dt><dd>${v.fps ? `${fmtFps(v.fps)}${v.vfr ? ' <span class="warn-inline">(variable)</span>' : ''}` : '-'}</dd>
-          <dt>Playback</dt><dd>${esc(v.playback)}</dd>
+          <dt>Playback</dt><dd>${esc(playbackText(v))}</dd>
         </dl>
         <div id="r-editor">
           ${editorHtml(v, 'r', true)}
@@ -1819,6 +2450,7 @@ function renderRateCurrent() {
     });
     if (!ok) return;
     try {
+      await releasePlayback();
       await invoke('trash_video', { id: v.id });
       state.rate.queue.splice(state.rate.index, 1);
       toast('Moved to trash.');
@@ -1945,7 +2577,7 @@ function renderOld() {
     </div>
     <p class="muted small" style="margin:0 0 12px">
       Files whose codecs the built-in player cannot decode, plus files with
-      <span class="warn-inline">VFR</span> (variable frame rate) timestamps that make Chromium stutter —
+      <span class="warn-inline">VFR</span> (variable frame rate) timestamps that make Chromium stutter �
       VLC smooths those over, the webview does not.
       <br><strong>Build playback cache</strong> converts into the cache, so playback starts instantly but the
       original files stay as they are. <strong>Convert to MP4</strong> writes a real
@@ -2266,11 +2898,12 @@ async function renderSimilarTab() {
       <div class="scan-box">
         <div class="row between">
           <strong>${pending} video${pending === 1 ? '' : 's'} not analyzed</strong>
-          <span class="muted small">${analyzed} analyzed</span>
+          <span class="muted small">${analyzed} analyzed${stats.dnaFailed ? ` \u00b7 ${stats.dnaFailed} not analyzable` : ''}</span>
         </div>
         <p class="muted small" style="margin:6px 0 8px">
           Video DNA compares frames sampled across each video, so it finds re-encodes,
           resolution changes and different bitrates that MD5 cannot.
+          ${stats.dnaFailed ? 'Files marked "not analyzable" have no decodable video (broken or audio-only) and are skipped; running the analysis again retries them.' : ''}
         </p>
         <button class="btn primary" id="dna-start" ${pending ? '' : 'disabled'}>
           ${pending ? `Analyze ${pending} video${pending === 1 ? '' : 's'}` : 'Everything analyzed'}
@@ -2358,6 +2991,7 @@ function renderSimilar() {
   const sub = $('#dup-sub');
   if (sub) sub.textContent = `${groups.length} similar group${groups.length === 1 ? '' : 's'} \u00b7 ${state.stats.dnaDone || 0} videos analyzed`;
   list.innerHTML = `<div class="dup-list">${groups.map(similarGroupHtml).join('')}</div>`;
+  attachPosterSwap(list);
 
   $$('.dup-group', list).forEach((groupEl) => {
     const index = Number(groupEl.dataset.similarIndex);
@@ -2403,6 +3037,9 @@ function similarGroupHtml(group, index) {
   const rows = group.videos.map((v, rowIndex) => `
     <tr data-id="${v.id}">
       <td><input type="radio" name="keep-sim-${index}" value="${v.id}" ${state.keep[`sim-${index}`] === v.id ? 'checked' : ''}></td>
+      <td class="dup-thumb-cell">
+        <img class="dup-thumb" loading="lazy" src="${state.media}/lowres/${v.id}?k=${v.mtime}" data-poster="${state.media}/poster/${v.id}?k=${v.mtime}" alt="">
+      </td>
       <td>
         <button type="button" class="linkish fname" data-open-id="${v.id}" title="Open ${esc(v.fileName)}">${esc(v.fileName)}</button>
         ${rowIndex === 0 ? '<span class="badge best" title="Highest resolution / largest file">best</span>' : ''}
@@ -2425,6 +3062,7 @@ function similarGroupHtml(group, index) {
         <thead>
           <tr>
             <th style="width:34px">Keep</th>
+            <th style="width:108px"></th>
             <th>File</th>
             <th style="width:90px">Size</th>
             <th style="width:120px">Resolution</th>
@@ -2996,6 +3634,40 @@ function viewSettings() {
       </section>
 
       <section class="panel">
+        <h2>Playback</h2>
+        <label class="check" style="margin:0 0 8px">
+          <input type="checkbox" id="set-native-player" ${b.nativePlayer ? 'checked' : ''}>
+          Use the built-in player for unsupported codecs and variable frame rate videos
+        </label>
+        <p class="muted small" style="margin:0">
+          Those files are decoded by ffmpeg and streamed into the player at a constant frame
+          rate, so nothing has to be converted first and audio stays in sync. It costs roughly
+          half a CPU core while playing a 1080p file. Turn this off to go back to converting
+          files into the cache.
+        </p>
+        <div class="row gap" style="margin-top:10px;align-items:center">
+          <label class="small" for="set-stream-window">Buffer ahead</label>
+          <select class="select" id="set-stream-window">
+            <option value="5">5 seconds</option>
+            <option value="15">15 seconds</option>
+            <option value="30">30 seconds (default)</option>
+            <option value="60">60 seconds</option>
+            <option value="120">120 seconds (high memory)</option>
+          </select>
+          <span class="muted small" id="stream-window-note"></span>
+        </div>
+        <p class="warn small hidden" id="stream-window-warn" style="margin:6px 0 0">
+          120 seconds keeps two minutes ahead and two minutes behind — roughly 240 MB at 1080p
+          (about 1 GB for 4K).
+        </p>
+        <p class="muted small" style="margin:6px 0 0">
+          The window is kept ahead of the playhead, and the same amount behind it for quick jumps
+          back — everything inside it can be seeked without restarting the decoder. It costs about
+          1 MB per second of video at 1080p, so the 30 second default is roughly 60 MB.
+        </p>
+      </section>
+
+      <section class="panel">
         <h2>Previews</h2>
         <p class="muted small" style="margin-top:0">
           Each library card needs one cached frame. On a slow disk that costs ~100 ms per card, so
@@ -3201,7 +3873,34 @@ function viewSettings() {
       /* ignore */
     }
   };
-  $('#set-prewarm').onchange = async (e) => {
+  $('#set-native-player').onchange = async (e) => {
+    try {
+      await invoke('set_native_player', { enabled: e.target.checked });
+      state.boot.nativePlayer = e.target.checked;
+    } catch (err) {
+      toast(String(err), 'error');
+    }
+  };
+  const windowSelect = $('#set-stream-window');
+  if (windowSelect) {
+    const paintWindowWarning = () => {
+      const warn = $('#stream-window-warn');
+      if (warn) warn.classList.toggle('hidden', Number(windowSelect.value) < 120);
+    };
+    windowSelect.value = String(state.boot.streamWindow || 30);
+    paintWindowWarning();
+    windowSelect.onchange = async () => {
+      try {
+        const saved = await invoke('set_stream_window', { seconds: Number(windowSelect.value) });
+        state.boot.streamWindow = saved;
+        windowSelect.value = String(saved);
+        paintWindowWarning();
+        toast(`Buffer ahead: ${saved} s`);
+      } catch (err) {
+        toast(String(err), 'error');
+      }
+    };
+  }  $('#set-prewarm').onchange = async (e) => {
     try {
       await invoke('set_prewarm_enabled', { enabled: e.target.checked });
       state.boot.prewarmPosters = e.target.checked;
@@ -3552,6 +4251,19 @@ document.addEventListener('keydown', (e) => {
     setDiscreet(!state.discreet);
     return;
   }
+  // Transport keys for the built-in player. Gated on it being active so the
+  // normal shortcuts still apply everywhere else.
+  if (streamPlayer) {
+    const tag = (e.target?.tagName || '').toLowerCase();
+    const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
+    if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (e.key === ' ') { e.preventDefault(); streamPlayer.toggle(); return; }
+      if (e.key === 'F11') { e.preventDefault(); streamPlayer.fullscreen(); return; }
+      if (e.key === 'm' || e.key === 'M') { e.preventDefault(); streamPlayer.mute(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); streamPlayer.volume(0.05); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); streamPlayer.volume(-0.05); return; }
+    }
+  }
   const detailVideo = document.querySelector('#d-video');
   const rateVideo = state.view === 'rate' ? document.querySelector('#r-video') : null;
   const activeVideo = detailVideo || rateVideo;
@@ -3563,6 +4275,10 @@ document.addEventListener('keydown', (e) => {
     e.stopPropagation();
     const step = e.ctrlKey ? 60 : 10;
     const direction = e.key === 'ArrowRight' ? 1 : -1;
+    if (streamPlayer) {
+      streamPlayer.seekBy(direction * step);
+      return;
+    }
     const duration = Number.isFinite(activeVideo.duration) ? activeVideo.duration : 0;
     let next = activeVideo.currentTime + direction * step;
     next = Math.max(0, next);

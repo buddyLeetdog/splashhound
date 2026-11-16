@@ -255,6 +255,36 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
 The first playback of a non-native file shows conversion progress; afterwards
 it starts immediately.
 
+### Built-in stream player (testing branch)
+
+Files WebView2 cannot decode — and files with a variable frame rate — are played
+by the built-in player instead of being converted: ffmpeg decodes the source and
+streams a constant-frame-rate fragmented MP4 into a `MediaSource` over a
+WebSocket. Nothing is cached, audio stays in sync, and VFR files no longer
+stutter because the output timestamps are uniform.
+
+- **Encoder**: the best hardware encoder the machine can actually use
+  (`h264_nvenc`, `h264_qsv`, `h264_amf`, `h264_vaapi` — each is test-encoded once)
+  with `libx264` as fallback. Decoding uses the matching GPU path too
+  (`cuda`, `qsv`, `d3d11va`, `vaapi`) when the source codec supports it, so the
+  frames never leave the GPU. Measured at 1080p: process CPU is ~0.02 cores with
+  CUDA + NVENC.
+- **Seeking**: the decoder runs ahead of the playhead (5–60 s, 30 s by default,
+  configurable in Settings → Playback) and the player reports how far ahead it
+  is, so any seek inside that window jumps without restarting the encoder
+  (measured 0 ms). The same amount is kept behind the playhead and older data is
+  trimmed, so memory stays at roughly 1 MB per buffered second (30 s ahead + 30 s
+  back ≈ 60 MB at 1080p) instead of growing over a long session. Bigger jumps
+  restart the encoder at the target while the last frame is held and settle in
+  ~0.3–0.5 s.
+- **Start**: the decoder is started while the detail view is still rendering, so
+  the first frame arrives in ~0.5 s.
+- **Controls**: play/pause, scrub bar, volume/mute, fullscreen (button, `F11` or
+  double-click), badges. Hotkeys: `Space`, `M`, `↑`/`↓`,
+  `Shift`/`Ctrl`+`←`/`→`, `F11`.
+
+Toggle it in **Settings → Playback**.
+
 ## Development
 
 ```

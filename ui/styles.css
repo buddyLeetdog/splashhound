@@ -186,7 +186,7 @@ label { color: var(--muted); font-size: 12px; display: block; margin-bottom: 4px
 .poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
 /* Tiny placeholder stored in the database: shown blurred until the real poster
    arrives, then swapped without a layout shift. */
-.poster img:not(.sharp) { filter: blur(4px); transform: scale(1.04); }
+.poster img:not(.sharp) { filter: blur(2px); transform: scale(1.02); }
 .poster img { transition: filter 0.15s ease; }
 .poster img.broken { display: none; }
 .poster::after {
@@ -250,6 +250,42 @@ label { color: var(--muted); font-size: 12px; display: block; margin-bottom: 4px
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Controls for the built-in stream player (its seeks restart the decoder, so
+   the native MediaSource controls cannot be used). */
+.stream-controls {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px 6px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.78));
+}
+.stream-controls button {
+  background: none; border: none; color: #fff; font-size: 15px; line-height: 1;
+  cursor: pointer; padding: 2px 4px;
+}
+.stream-controls button:hover { color: var(--accent); }
+.stream-controls .sc-range { flex: 1; accent-color: var(--accent); height: 4px; cursor: pointer; }
+.stream-controls .sc-now,
+.stream-controls .sc-total { font-size: 11px; color: #cfd9e2; font-variant-numeric: tabular-nums; }
+.stream-controls .sc-badge {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--accent); opacity: 0.85;
+}
+/* Clicking the picture toggles playback, like the native player. */
+.stream-video { cursor: pointer; }
+/* Freeze frame shown while a seek restarts the decoder. */
+.seek-freeze {
+  position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2;
+  object-fit: contain; background: #000; pointer-events: none;
+}
+/* Fullscreen uses the player box, not the <video>, so the controls stay. */
+.player-wrap:fullscreen {
+  width: 100vw; height: 100vh; border-radius: 0; border: none;
+  background: #000; display: flex; align-items: center; justify-content: center;
+}
+.player-wrap:fullscreen video {
+  width: 100%; height: 100%; max-height: none; object-fit: contain;
+}
+.player-wrap:fullscreen .stream-controls { padding-bottom: 12px; }
 
 .progress { height: 6px; background: #1a232c; border-radius: 4px; overflow: hidden; }
 .progress > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #55b8ff); transition: width 0.25s; border-radius: 4px; }
@@ -341,6 +377,12 @@ kbd {
 .dup-table tr:last-child td { border-bottom: none; }
 .dup-table tr.kept { background: rgba(53, 208, 165, 0.05); }
 .dup-table .fname { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dup-thumb-cell { padding: 6px 10px; }
+.dup-thumb {
+  width: 96px; height: 54px; object-fit: cover; display: block;
+  border-radius: 4px; background: #000;
+}
+.dup-thumb.broken { visibility: hidden; }
 .dup-table input[type="radio"] { accent-color: var(--accent); }
 .dup-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px; }
 
