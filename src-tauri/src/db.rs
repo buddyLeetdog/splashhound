@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS videos (
   vcodec      TEXT,
   acodec      TEXT,
   pix_fmt     TEXT,
+  fps         REAL,
+  vfr         INTEGER NOT NULL DEFAULT 0,
   has_audio   INTEGER NOT NULL DEFAULT 0,
   md5         TEXT,
   creator     TEXT,
@@ -103,7 +105,8 @@ CREATE INDEX IF NOT EXISTS idx_vt_tag ON video_tags(tag_id, video_id);
 pub const VIDEO_COLS: &str = "v.id, v.path, v.file_name, v.ext, v.size, v.mtime, \
      v.duration_ms, v.width, v.height, v.vcodec, v.acodec, v.has_audio, v.md5, \
      v.creator, v.nsfw, v.popping, v.destruction, v.deflation, v.inflation, \
-     v.notes, v.rating, v.reviewed, v.view_count, v.added_at, v.missing, v.pix_fmt";
+     v.notes, v.rating, v.reviewed, v.view_count, v.added_at, v.missing, v.pix_fmt, \
+     v.fps, v.vfr";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,6 +123,8 @@ pub struct VideoDto {
     pub vcodec: Option<String>,
     pub acodec: Option<String>,
     pub pix_fmt: Option<String>,
+    pub fps: Option<f64>,
+    pub vfr: bool,
     pub has_audio: bool,
     pub md5: Option<String>,
     pub creator: Option<String>,
@@ -157,6 +162,8 @@ pub fn video_from_row(r: &Row<'_>) -> rusqlite::Result<VideoDto> {
     let vcodec: Option<String> = r.get(9)?;
     let acodec: Option<String> = r.get(10)?;
     let pix_fmt: Option<String> = r.get(25)?;
+    let fps: Option<f64> = r.get(26)?;
+    let vfr: i64 = r.get(27)?;
     let duration: Option<i64> = r.get(6)?;
     Ok(VideoDto {
         id: r.get(0)?,
@@ -171,6 +178,8 @@ pub fn video_from_row(r: &Row<'_>) -> rusqlite::Result<VideoDto> {
         vcodec: vcodec.clone(),
         acodec: acodec.clone(),
         pix_fmt: pix_fmt.clone(),
+        fps,
+        vfr: vfr != 0,
         has_audio: b(r.get(11)?),
         md5: r.get(12)?,
         creator: r.get(13)?,
@@ -207,6 +216,8 @@ pub fn open(path: &Path) -> Result<Connection> {
     ensure_column(&conn, "videos", "hash_state", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(&conn, "videos", "rel_path", "TEXT")?;
     ensure_column(&conn, "videos", "pix_fmt", "TEXT")?;
+    ensure_column(&conn, "videos", "fps", "REAL")?;
+    ensure_column(&conn, "videos", "vfr", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(conn)
 }
 
@@ -444,8 +455,9 @@ pub fn get_video(conn: &Connection, id: i64) -> Result<Option<VideoDto>> {
     Ok(v)
 }
 
-/// Videos whose streams WebView2 cannot decode, i.e. everything that has to be
-/// converted before it can be watched.
+/// Videos that need conversion before they play well: either a codec the
+/// webview cannot decode, or irregular (variable) frame timing that makes
+/// Chromium stutter.
 pub fn old_codec_videos(conn: &Connection) -> Result<Vec<VideoDto>> {
     let sql = format!(
         "SELECT {} FROM videos v WHERE v.missing = 0 ORDER BY v.size DESC",
@@ -456,7 +468,7 @@ pub fn old_codec_videos(conn: &Connection) -> Result<Vec<VideoDto>> {
     let mut out = Vec::new();
     for row in rows {
         let video = row?;
-        if video.playback == "transcode" {
+        if video.playback == "transcode" || video.vfr {
             out.push(video);
         }
     }
@@ -1178,8 +1190,8 @@ pub fn upsert_file(
             if changed {
                 conn.execute(
                     "UPDATE videos SET size = ?2, mtime = ?3, rel_path = ?4, duration_ms = NULL, width = NULL,
-                        height = NULL, vcodec = NULL, acodec = NULL, pix_fmt = NULL, has_audio = 0, md5 = NULL,
-                        hash_state = 0, missing = 0
+                        height = NULL, vcodec = NULL, acodec = NULL, pix_fmt = NULL, fps = NULL, vfr = 0,
+                        has_audio = 0, md5 = NULL, hash_state = 0, missing = 0
                      WHERE id = ?1",
                     params![id, size, mtime, rel_path],
                 )?;
@@ -1234,7 +1246,8 @@ pub fn pending_metadata(conn: &Connection) -> Result<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT id, path FROM videos
          WHERE missing = 0 AND (duration_ms IS NULL
-            OR (pix_fmt IS NULL AND vcodec = 'h264'))
+            OR (pix_fmt IS NULL AND vcodec = 'h264')
+            OR fps IS NULL)
          ORDER BY size ASC",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1254,7 +1267,7 @@ pub fn pending_hashes(conn: &Connection) -> Result<Vec<(i64, String)>> {
 pub fn set_metadata(conn: &Connection, id: i64, p: &crate::media::ProbeInfo) -> Result<()> {
     conn.execute(
         "UPDATE videos SET duration_ms = ?2, width = ?3, height = ?4, vcodec = ?5,
-            acodec = ?6, has_audio = ?7, pix_fmt = ?8
+            acodec = ?6, has_audio = ?7, pix_fmt = ?8, fps = ?9, vfr = ?10
          WHERE id = ?1",
         params![
             id,
@@ -1264,7 +1277,9 @@ pub fn set_metadata(conn: &Connection, id: i64, p: &crate::media::ProbeInfo) -> 
             p.vcodec,
             p.acodec,
             if p.has_audio { 1 } else { 0 },
-            p.pix_fmt
+            p.pix_fmt,
+            p.fps,
+            if p.vfr { 1 } else { 0 }
         ],
     )?;
     Ok(())

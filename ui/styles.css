@@ -101,6 +101,7 @@ input, textarea { user-select: text; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 .warn { color: var(--warn); }
+.warn-inline { color: var(--warn); font-size: 11px; }
 .mono { font-family: Consolas, "Cascadia Mono", monospace; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hidden { display: none !important; }

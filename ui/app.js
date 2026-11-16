@@ -91,6 +91,12 @@ function fmtDur(ms) {
            : `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function fmtFps(fps) {
+  if (!fps) return '-';
+  const rounded = Math.round(fps * 100) / 100;
+  return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(2)} fps`;
+}
+
 function fmtClock(seconds) {
   const total = Math.max(0, Math.floor(seconds || 0));
   const m = Math.floor(total / 60);
@@ -1507,6 +1513,7 @@ function detailRightHtml(v, ids, index) {
       <dt>Duration</dt><dd>${v.durationMs ? fmtDur(v.durationMs) : '-'}</dd>
       <dt>Size</dt><dd>${fmtSize(v.size)}</dd>
       <dt>Resolution</dt><dd>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</dd>
+      <dt>Frame rate</dt><dd>${v.fps ? `${fmtFps(v.fps)}${v.vfr ? ' <span class="warn-inline">(variable)</span>' : ''}` : '-'}</dd>
       <dt>Codecs</dt><dd>${esc(v.vcodec || '?')} / ${esc(v.acodec || 'no audio')}</dd>
       <dt>Playback</dt><dd>${esc(v.playback)}</dd>
       <dt>MD5</dt><dd class="mono">${esc(v.md5 || 'not hashed yet')}</dd>
@@ -1760,6 +1767,7 @@ function renderRateCurrent() {
           <dt>Duration</dt><dd>${v.durationMs ? fmtDur(v.durationMs) : '-'}</dd>
           <dt>Size</dt><dd>${fmtSize(v.size)}</dd>
           <dt>Resolution</dt><dd>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</dd>
+          <dt>Frame rate</dt><dd>${v.fps ? `${fmtFps(v.fps)}${v.vfr ? ' <span class="warn-inline">(variable)</span>' : ''}` : '-'}</dd>
           <dt>Playback</dt><dd>${esc(v.playback)}</dd>
         </dl>
         <div id="r-editor">
@@ -1865,7 +1873,7 @@ async function viewOld() {
     <header class="page-head">
       <div>
         <h1>Old codecs</h1>
-        <p class="muted" id="old-sub">Looking for formats WebView2 cannot decode...</p>
+        <p class="muted" id="old-sub">Looking for codecs and timings the player cannot handle...</p>
       </div>
       <div class="head-actions">
         <button class="btn" id="old-refresh">Refresh</button>
@@ -1925,7 +1933,10 @@ function renderOld() {
       </label>
     </div>
     <p class="muted small" style="margin:0 0 12px">
-      <strong>Build playback cache</strong> converts into the cache, so playback starts instantly but the
+      Files whose codecs the built-in player cannot decode, plus files with
+      <span class="warn-inline">VFR</span> (variable frame rate) timestamps that make Chromium stutter —
+      VLC smooths those over, the webview does not.
+      <br><strong>Build playback cache</strong> converts into the cache, so playback starts instantly but the
       original files stay as they are. <strong>Convert to MP4</strong> writes a real
       <code>.mp4</code> next to the original, adds it to the library with the same tags, rating and flags,
       and optionally moves the source to <code>_trash</code>.
@@ -1949,7 +1960,7 @@ function renderOld() {
           <tr data-id="${v.id}">
             <td><input type="checkbox" class="old-check" data-id="${v.id}" ${selected.has(v.id) ? 'checked' : ''}></td>
             <td><button class="link-btn fname" data-open="${v.id}" title="${esc(v.path)}">${esc(v.fileName)}</button></td>
-            <td class="mono small">${esc(v.vcodec || '?')}</td>
+            <td class="mono small">${esc(v.vcodec || '?')}${v.vfr ? ' <span class="warn-inline">VFR</span>' : ''}</td>
             <td class="small">${v.width ? `${v.width}\u00d7${v.height}` : '-'}</td>
             <td>${fmtSize(v.size)}</td>
             <td>${v.durationMs ? fmtDur(v.durationMs) : '-'}</td>

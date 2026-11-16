@@ -39,8 +39,28 @@ pub struct ProbeInfo {
     pub vcodec: Option<String>,
     pub acodec: Option<String>,
     pub pix_fmt: Option<String>,
+    pub fps: Option<f64>,
+    pub vfr: bool,
     pub has_audio: bool,
     pub format_name: Option<String>,
+}
+
+/// Parse an ffprobe rational frame rate ("30000/1001"). Rates outside a sane
+/// range (0/0 for unknown, 90000/1 for odd files) are ignored.
+pub fn parse_frame_rate(value: Option<&str>) -> Option<f64> {
+    let raw = value?.trim();
+    let (num, den) = raw.split_once('/')?;
+    let num: f64 = num.trim().parse().ok()?;
+    let den: f64 = den.trim().parse().ok()?;
+    if den <= 0.0 || num <= 0.0 {
+        return None;
+    }
+    let fps = num / den;
+    if (1.0..=240.0).contains(&fps) {
+        Some((fps * 1000.0).round() / 1000.0)
+    } else {
+        None
+    }
 }
 
 /// Codecs the running WebView2 can decode that Chromium does not ship itself.
@@ -259,6 +279,18 @@ pub async fn probe(ffprobe: &Path, file: &Path) -> Result<ProbeInfo> {
                             .get("pix_fmt")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
+                        // A frame rate range wider than a couple of percent means
+                        // the file has irregular timestamps (variable frame rate),
+                        // which Chromium renders with visible stutter.
+                        let avg =
+                            parse_frame_rate(stream.get("avg_frame_rate").and_then(|v| v.as_str()));
+                        let max =
+                            parse_frame_rate(stream.get("r_frame_rate").and_then(|v| v.as_str()));
+                        info.fps = avg;
+                        info.vfr = match (avg, max) {
+                            (Some(avg), Some(max)) => max > avg * 1.05,
+                            _ => false,
+                        };
                         if info.duration_ms.is_none() {
                             info.duration_ms = stream
                                 .get("duration")
@@ -596,6 +628,12 @@ async fn ffmpeg_convert(
             "-pix_fmt",
             "yuv420p",
         ]);
+        // Write constant frame timestamps: variable-rate sources (screen
+        // recordings, re-muxed edits) make the browser stutter at every gap.
+        cmd.args(["-fps_mode", "cfr"]);
+        if let Some(fps) = v.fps.filter(|f| (1.0..=240.0).contains(f)) {
+            cmd.args(["-r", &format!("{fps:.3}")]);
+        }
     }
     if copy_audio {
         cmd.args(["-c:a", "copy"]);
@@ -921,6 +959,18 @@ mod tests {
         assert_eq!(Quality::parse(Some("quality")).crf(), 18);
         assert!(Quality::Quality.audio_bitrate() > Quality::Fast.audio_bitrate());
         assert_eq!(Quality::parse(Some("QUALITY")).as_str(), "quality");
+    }
+
+    #[test]
+    fn frame_rates_are_parsed_from_ffprobe() {
+        assert_eq!(parse_frame_rate(Some("30/1")), Some(30.0));
+        assert_eq!(parse_frame_rate(Some("30000/1001")), Some(29.97));
+        assert_eq!(parse_frame_rate(Some("1566855/52229")), Some(30.0));
+        // Unknown or implausible rates are ignored.
+        assert_eq!(parse_frame_rate(Some("0/0")), None);
+        assert_eq!(parse_frame_rate(Some("1/0")), None);
+        assert_eq!(parse_frame_rate(Some("90000/1")), None);
+        assert_eq!(parse_frame_rate(None), None);
     }
 
     #[test]

@@ -114,10 +114,10 @@ viewed, recently added, videos without toys or tags, trash and DNA progress,
 plus rating distribution, toy counts, creators and folder counts.
 
 ### Old codecs
-Lists every video whose streams the built-in player cannot decode — WMV/VC-1,
-MPEG-1/2, MPEG-4 ASP (Xvid/DivX), Sorenson FLV, Indeo, MJPEG, high-bit-depth
-H.264, and HEVC when the webview has no HEVC decoder — with codec, resolution,
-size and length. Select files and either:
+Lists every video that will not play smoothly — WMV/VC-1, MPEG-1/2, MPEG-4 ASP
+(Xvid/DivX), Sorenson FLV, Indeo, MJPEG, high-bit-depth H.264, HEVC when the
+webview has no HEVC decoder, and files with **VFR** (variable frame rate)
+timestamps — with codec, resolution, size and length. Select files and either:
 
 - **Build playback cache** — converts them into the playback cache. Nothing on
   disk changes, playback starts instantly afterwards, and the entries count
@@ -237,6 +237,11 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
   MJPEG are transcoded to H.264/AAC once and cached.
 - H.264 must be 8-bit 4:2:0. Hi10P and 4:2:2 files are transcoded because
   WebView2 cannot decode them.
+- Variable frame rate files (screen recordings, some studio exports) are a
+  separate problem: the codec is fine, but irregular timestamps make Chromium
+  stutter at every gap while VLC smooths over them. The detail view labels the
+  frame rate as *(variable)* and the file is listed under **Old codecs**;
+  converting it writes constant frame timestamps.
 
 The first playback of a non-native file shows conversion progress; afterwards
 it starts immediately.
