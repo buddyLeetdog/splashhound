@@ -385,6 +385,7 @@ async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebS
     let mut sent = 0usize;
     let mut errors: Vec<String> = Vec::new();
     let mut child = None;
+    let mut reached_end = false;
 
     for attempt in attempts(hardware, video.vcodec.as_deref()) {
         let label = match attempt.hwaccel {
@@ -420,8 +421,9 @@ async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebS
         )
         .await
         {
-            Ok(bytes) => {
+            Ok((bytes, eof)) => {
                 sent = bytes;
+                reached_end = eof;
                 child = Some(guard);
                 break;
             }
@@ -445,6 +447,10 @@ async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebS
             format!("decoder failed: {}", errors.join(" | "))
         };
         let _ = sink.send(Message::Text(message.into())).await;
+    } else if reached_end {
+        // Tell the player the source is done but there is still buffered video:
+        // it finishes playing the buffer before showing "finished".
+        let _ = sink.send(Message::Text("{\"eof\":true}".into())).await;
     }
     let _ = sink.send(Message::Close(None)).await;
     closed.abort();
@@ -462,7 +468,7 @@ async fn stream_with(
     ahead: &std::sync::atomic::AtomicU64,
     last_report: &std::sync::atomic::AtomicU64,
     window_ms: u64,
-) -> Result<usize, (String, usize)> {
+) -> Result<(usize, bool), (String, usize)> {
     let mut buf = vec![0u8; 64 * 1024];
     let mut sent = 0usize;
     let opened_at = now_ms();
@@ -478,26 +484,26 @@ async fn stream_with(
             now_ms().saturating_sub(last) > 12_000
         };
         if silent {
-            return Ok(sent);
+            return Ok((sent, false));
         }
         // Stop reading from ffmpeg once the client is far enough ahead; the
         // pipe backpressure pauses the encoder without killing it.
         if ahead_ms > window_ms {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(80)) => continue,
-                _ = &mut *closed => return Ok(sent),
+                _ = &mut *closed => return Ok((sent, false)),
             }
         }
         // Wait for the first buffer report before racing ahead.
         if last == 0 && now_ms().saturating_sub(opened_at) > 1_500 {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-                _ = &mut *closed => return Ok(sent),
+                _ = &mut *closed => return Ok((sent, false)),
             }
         }
         let read = tokio::select! {
             read = stdout.read(&mut buf) => read,
-            _ = &mut *closed => return Ok(sent),
+            _ = &mut *closed => return Ok((sent, false)),
         };
         let Ok(n) = read else {
             break;
@@ -509,10 +515,10 @@ async fn stream_with(
         let chunk = Message::Binary(buf[..n].to_vec().into());
         let failed = tokio::select! {
             result = sink.send(chunk) => result.is_err(),
-            _ = &mut *closed => return Ok(sent),
+            _ = &mut *closed => return Ok((sent, false)),
         };
         if failed {
-            return Ok(sent);
+            return Ok((sent, false));
         }
     }
     if sent == 0 {
@@ -534,7 +540,7 @@ async fn stream_with(
             .join(" | ");
         return Err((format!("{encoder} failed: {tail}"), 0));
     }
-    Ok(sent)
+    Ok((sent, true))
 }
 
 #[cfg(test)]

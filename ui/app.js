@@ -1510,11 +1510,46 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
   let creditTimer = null;
   let receivedBytes = 0;
   let queue = [];
+  let endSignalled = false;
+  let finished = false;
 
   const fail = (message) => {
     if (freeze) freeze.remove();
     overlay.classList.remove('hidden');
     overlay.innerHTML = `<div class="player-error">${esc(message)}</div>`;
+  };
+
+  /** Show the end state once the buffered tail has actually played out. */
+  const showFinished = () => {
+    if (finished || stopped) return;
+    finished = true;
+    if (creditTimer) clearInterval(creditTimer);
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = '<div class="muted">Playback finished</div>';
+  };
+
+  /**
+   * The decoder always runs ahead of the playhead, so its end arrives while up
+   * to a window of video is still buffered. Close the MediaSource and let the
+   * element play that tail; "finished" is shown when it really ends.
+   */
+  const finishWhenDrained = () => {
+    if (stopped || !source) return;
+    if (queue.length || source.updating) {
+      setTimeout(finishWhenDrained, 120);
+      return;
+    }
+    try {
+      if (ms.readyState === 'open') ms.endOfStream();
+    } catch (err) {
+      /* already closed */
+    }
+    // Safety net: if "ended" never fires (e.g. the tail is shorter than the
+    // buffer), stop waiting after the remaining audio would have played.
+    const remaining = videoEl.buffered.length
+      ? Math.max(0, videoEl.buffered.end(videoEl.buffered.length - 1) - videoEl.currentTime)
+      : 0;
+    setTimeout(showFinished, Math.max(500, remaining * 1000 + 1200));
   };
 
   const pump = () => {
@@ -1560,6 +1595,17 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
       ws.onmessage = (event) => {
         if (stopped || token !== state.playerToken) return;
         if (typeof event.data === 'string') {
+          let payload = null;
+          try {
+            payload = JSON.parse(event.data);
+          } catch (err) {
+            payload = null;
+          }
+          if (payload && payload.eof) {
+            endSignalled = true;
+            finishWhenDrained();
+            return;
+          }
           fail(event.data);
           return;
         }
@@ -1569,10 +1615,13 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
       };
       ws.onclose = () => {
         if (stopped || token !== state.playerToken) return;
+        if (endSignalled) {
+          // The buffer still has to play out; finishWhenDrained handles the UI.
+          finishWhenDrained();
+          return;
+        }
         if (videoEl.readyState >= 2) {
-          if (freeze) freeze.remove();
-          overlay.classList.remove('hidden');
-          overlay.innerHTML = '<div class="muted">Playback finished</div>';
+          showFinished();
         } else {
           fail('The decoder stopped before producing video.');
         }
@@ -1827,6 +1876,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
     videoEl.addEventListener('play', setButton);
     videoEl.addEventListener('pause', setButton);
     videoEl.addEventListener('timeupdate', paint);
+    videoEl.addEventListener('ended', showFinished);
     // Drag: preview the position; release: reconnect there.
     rangeEl.addEventListener('input', () => {
       if (nowEl && duration) nowEl.textContent = fmt((Number(rangeEl.value) / 1000) * duration);
@@ -1901,6 +1951,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
       if (clickTimer) clearTimeout(clickTimer);
       if (creditTimer) clearInterval(creditTimer);
       videoEl.removeEventListener('seeking', onSeeking);
+      videoEl.removeEventListener('ended', showFinished);
       if (onVideoClick) videoEl.removeEventListener('click', onVideoClick);
       if (onVideoDoubleClick) videoEl.removeEventListener('dblclick', onVideoDoubleClick);
       videoEl.classList.remove('stream-video');
