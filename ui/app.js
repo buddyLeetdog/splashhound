@@ -433,6 +433,8 @@ function defaultFilter() {
     tagMode: 'any',
     toys: [],
     nsfw: 'any',
+    popping: 'any',
+    destruction: 'any',
     reviewed: 'any',
     minRating: 0,
     creator: '',
@@ -472,6 +474,18 @@ function viewLibrary() {
         <option value="any">NSFW: any</option>
         <option value="yes">NSFW only</option>
         <option value="no">SFW only</option>
+      </select>` : ''}
+      ${state.visibleFlags.popping ? `
+      <select class="select" id="f-popping">
+        <option value="any">Popping: any</option>
+        <option value="yes">Popping only</option>
+        <option value="no">No popping</option>
+      </select>` : ''}
+      ${state.visibleFlags.destruction ? `
+      <select class="select" id="f-destruction">
+        <option value="any">Destruction: any</option>
+        <option value="yes">Destruction only</option>
+        <option value="no">No destruction</option>
       </select>` : ''}
       <select class="select" id="f-reviewed">
         <option value="any">Reviewed: any</option>
@@ -518,6 +532,11 @@ function viewLibrary() {
 
   const nsfwFilter = $('#f-nsfw');
   if (nsfwFilter) nsfwFilter.value = f.nsfw;
+  // A filter whose flag is hidden in Settings must not keep constraining the grid.
+  if (!state.visibleFlags.popping) f.popping = 'any';
+  if (!state.visibleFlags.destruction) f.destruction = 'any';
+  if ($('#f-popping')) $('#f-popping').value = f.popping;
+  if ($('#f-destruction')) $('#f-destruction').value = f.destruction;
   $('#f-reviewed').value = f.reviewed;
   $('#f-rating').value = String(f.minRating);
   $('#f-sort').value = f.sort;
@@ -529,6 +548,8 @@ function viewLibrary() {
     searchTimer = setTimeout(() => loadLibrary(true), 280);
   });
   if ($('#f-nsfw')) $('#f-nsfw').addEventListener('change', (e) => { f.nsfw = e.target.value; loadLibrary(true); });
+  if ($('#f-popping')) $('#f-popping').addEventListener('change', (e) => { f.popping = e.target.value; renderActiveFilters(); loadLibrary(true); });
+  if ($('#f-destruction')) $('#f-destruction').addEventListener('change', (e) => { f.destruction = e.target.value; renderActiveFilters(); loadLibrary(true); });
   $('#f-reviewed').addEventListener('change', (e) => { f.reviewed = e.target.value; loadLibrary(true); });
   $('#f-rating').addEventListener('change', (e) => { f.minRating = Number(e.target.value); loadLibrary(true); });
   $('#f-creator').addEventListener('change', (e) => { f.creator = e.target.value; loadLibrary(true); });
@@ -803,7 +824,23 @@ function renderActiveFilters() {
   wrap.innerHTML = f.tags.map((t) => `
       <span class="chip active">${esc(t)}<button class="chip-x" data-remove="${esc(t)}">\u00d7</button></span>`).join('')
     + f.toys.map((t) => `
-      <span class="chip active toy">${esc(t)}<button class="chip-x" data-remove-toy="${esc(t)}">\u00d7</button></span>`).join('');
+      <span class="chip active toy">${esc(t)}<button class="chip-x" data-remove-toy="${esc(t)}">\u00d7</button></span>`).join('')
+    + (f.popping !== 'any' && state.visibleFlags.popping
+      ? `<span class="chip active">${f.popping === 'yes' ? 'Popping only' : 'No popping'}<button class="chip-x" data-clear-filter="popping">\u00d7</button></span>`
+      : '')
+    + (f.destruction !== 'any' && state.visibleFlags.destruction
+      ? `<span class="chip active">${f.destruction === 'yes' ? 'Destruction only' : 'No destruction'}<button class="chip-x" data-clear-filter="destruction">\u00d7</button></span>`
+      : '');
+  $$('[data-clear-filter]', wrap).forEach((b) => {
+    b.onclick = () => {
+      const key = b.dataset.clearFilter;
+      f[key] = 'any';
+      const select = $(`#f-${key}`);
+      if (select) select.value = 'any';
+      renderActiveFilters();
+      loadLibrary(true);
+    };
+  });
   $$('[data-remove]', wrap).forEach((b) => {
     b.onclick = () => {
       f.tags = f.tags.filter((t) => t !== b.dataset.remove);
@@ -881,7 +918,12 @@ function maybeLoadMoreLibrary() {
 async function loadLibrary(reset) {
   const grid = $('#lib-grid');
   if (!grid) return;
-  if (state.lib.loading) return;
+  if (state.lib.loading) {
+    // A reload requested while another is in flight must not be dropped, or the
+    // grid would keep showing results for an older filter.
+    if (reset) state.lib.pendingReload = true;
+    return;
+  }
   const f = state.lib.filter;
   const moreButton = $('#lib-more');
   if (reset) {
@@ -911,6 +953,10 @@ async function loadLibrary(reset) {
       moreButton.disabled = false;
       moreButton.textContent = 'Load more';
     }
+    if (state.lib.pendingReload) {
+      state.lib.pendingReload = false;
+      loadLibrary(true);
+    }
   }
 }
 
@@ -923,7 +969,8 @@ function renderLibraryGrid() {
   if (sub) {
     const filtered = state.lib.filter.tags.length || state.lib.filter.search || state.lib.filter.nsfw !== 'any'
       || state.lib.filter.reviewed !== 'any' || state.lib.filter.minRating || state.lib.filter.creator
-      || state.lib.filter.folder || state.lib.filter.toys.length;
+      || state.lib.filter.folder || state.lib.filter.toys.length
+      || state.lib.filter.popping !== 'any' || state.lib.filter.destruction !== 'any';
     sub.textContent = filtered
       ? `${items.length} of ${total} matching video${total === 1 ? '' : 's'}`
       : `${total} video${total === 1 ? '' : 's'} \u00b7 ${fmtSize(state.stats.totalSize || 0)}`;

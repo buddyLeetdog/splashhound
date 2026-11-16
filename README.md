@@ -85,7 +85,8 @@ Grid of every indexed video with poster frame, duration, size, resolution,
 rating and flag badges.
 
 Filters: full-text search (name, path, creator, notes), tag chips
-(any/all matching), NSFW, reviewed state, minimum rating, creator.
+(any/all matching), NSFW, Popping, Destruction, reviewed state, minimum rating,
+creator. The flag filters only appear when the flag is enabled in Settings.
 Sorting: newest added, name, rating, most viewed, longest, largest,
 random. **Shuffle** re-rolls a random order. Click a card for the detail view
 (player, 12 preview frames, editable metadata).

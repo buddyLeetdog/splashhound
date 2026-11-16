@@ -530,6 +530,8 @@ pub struct VideoFilter {
     pub tag_mode: String,
     pub toys: Vec<String>,
     pub nsfw: String,
+    pub popping: String,
+    pub destruction: String,
     pub reviewed: String,
     pub min_rating: i64,
     pub creator: Option<String>,
@@ -603,6 +605,16 @@ fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
         clauses.push("v.nsfw = 1".into());
     } else if f.nsfw == "no" {
         clauses.push("v.nsfw = 0".into());
+    }
+    if f.popping == "yes" {
+        clauses.push("v.popping = 1".into());
+    } else if f.popping == "no" {
+        clauses.push("v.popping = 0".into());
+    }
+    if f.destruction == "yes" {
+        clauses.push("v.destruction = 1".into());
+    } else if f.destruction == "no" {
+        clauses.push("v.destruction = 0".into());
     }
     if f.reviewed == "yes" {
         clauses.push("v.reviewed = 1".into());
