@@ -58,6 +58,18 @@ pub fn hardware_encoder(ffmpeg: &Path) -> Option<&'static str> {
     })
 }
 
+/// First usable VAAPI render node. Most systems expose `renderD128`, but some
+/// drivers enumerate it under another number.
+fn vaapi_device() -> String {
+    for index in 128..136 {
+        let node = format!("/dev/dri/renderD{index}");
+        if Path::new(&node).exists() {
+            return node;
+        }
+    }
+    "/dev/dri/renderD128".to_string()
+}
+
 fn encoder_works(ffmpeg: &Path, name: &str) -> bool {
     let mut cmd = std::process::Command::new(ffmpeg);
     // 640x360: some hardware encoders reject very small frames.
@@ -71,7 +83,7 @@ fn encoder_works(ffmpeg: &Path, name: &str) -> bool {
         "color=c=black:s=640x360:r=30:d=0.3",
     ]);
     if name == "h264_vaapi" {
-        cmd.args(["-vaapi_device", "/dev/dri/renderD128"]);
+        cmd.arg("-vaapi_device").arg(vaapi_device());
     }
     cmd.args(["-c:v", name]);
     if name == "h264_vaapi" {
@@ -172,16 +184,7 @@ fn encoder_args(name: &str, level: &str, gop: i64, software_frames: bool) -> Vec
         "h264_amf" => vec![
             "-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23",
         ],
-        "h264_vaapi" => vec![
-            "-vaapi_device",
-            "/dev/dri/renderD128",
-            "-c:v",
-            "h264_vaapi",
-            "-qp",
-            "23",
-            "-vf",
-            "format=nv12,hwupload",
-        ],
+        "h264_vaapi" => vec!["-c:v", "h264_vaapi", "-qp", "23"],
         _ => vec![
             "-c:v",
             "libx264",
@@ -196,6 +199,19 @@ fn encoder_args(name: &str, level: &str, gop: i64, software_frames: bool) -> Vec
     .into_iter()
     .map(str::to_string)
     .collect();
+
+    // The render node varies between systems, so insert the detected one.
+    if name == "h264_vaapi" {
+        args.insert(0, vaapi_device());
+        args.insert(0, "-vaapi_device".to_string());
+        // Hardware-decoded frames are already on the GPU; only software frames
+        // have to be uploaded. Adding the filter to a VAAPI-to-VAAPI pipeline
+        // makes ffmpeg fail to negotiate the format.
+        if software_frames {
+            args.push("-vf".to_string());
+            args.push("format=nv12,hwupload".to_string());
+        }
+    }
 
     // VAAPI uploads frames to the GPU and hardware decoding keeps them there;
     // forcing a raw pixel format in those cases makes ffmpeg stall.
@@ -280,7 +296,7 @@ fn build_command(
     // them directly when both sides agree on the format.
     if let Some((accel, format)) = attempt.hwaccel {
         if accel == "vaapi" {
-            cmd.args(["-vaapi_device", "/dev/dri/renderD128"]);
+            cmd.arg("-vaapi_device").arg(vaapi_device());
         }
         cmd.args(["-hwaccel", accel, "-hwaccel_output_format", format]);
     }

@@ -73,6 +73,33 @@ function esc(value) {  return String(value ?? '').replace(/[&<>"']/g, (c) => ({
   }[c]));
 }
 
+/** The OS name reported by the backend ("windows", "linux", "macos"). */
+function hostOs() {
+  return state.boot?.os || 'windows';
+}
+
+function isWindowsHost() {
+  return hostOs() === 'windows';
+}
+
+/** Command shown in the "ffmpeg is not installed" dialog for this platform. */
+function ffmpegInstallCommand() {
+  const os = hostOs();
+  if (os === 'windows') return 'winget install Gyan.FFmpeg';
+  if (os === 'macos') return 'brew install ffmpeg';
+  return 'sudo apt install ffmpeg';
+}
+
+/** A path hint for the ffmpeg folder field. */
+function ffmpegDirPlaceholder() {
+  return isWindowsHost() ? 'C:\\path\\to\\ffmpeg\\bin' : '/usr/bin';
+}
+
+/** File names of the two ffmpeg binaries on this platform. */
+function ffmpegBinaryNames() {
+  return isWindowsHost() ? 'ffmpeg.exe and ffprobe.exe' : 'ffmpeg and ffprobe';
+}
+
 function fmtSize(bytes) {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -358,10 +385,10 @@ function maybePromptFfmpeg() {
       </ul>
       <p class="muted small" style="margin:0 0 6px">Install it from a terminal:</p>
       <div class="path-row">
-        <input class="input mono" id="ffmpeg-cmd" readonly value="winget install Gyan.FFmpeg">
+        <input class="input mono" id="ffmpeg-cmd" readonly value="${esc(ffmpegInstallCommand())}">
         <button class="btn" id="ffmpeg-copy">Copy</button>
       </div>
-      <p class="muted small">Already have it? Point to the folder containing <code>ffmpeg.exe</code> in Settings, or install it and click Check again.</p>
+      <p class="muted small">Already have it? Point to the folder containing <code>${esc(ffmpegBinaryNames())}</code> in Settings, or install it and click Check again.</p>
     </div>
     <div class="modal-actions">
       <button class="btn" id="ffmpeg-skip">Continue without it</button>
@@ -370,7 +397,7 @@ function maybePromptFfmpeg() {
     onMount(root, close) {
       $('#ffmpeg-copy', root).onclick = async () => {
         try {
-          await navigator.clipboard.writeText('winget install Gyan.FFmpeg');
+          await navigator.clipboard.writeText(ffmpegInstallCommand());
           toast('Command copied.');
         } catch (err) {
           const input = $('#ffmpeg-cmd', root);
@@ -644,8 +671,12 @@ function viewLibrary() {
 
 function folderLabel(path) {
   if (!path) return '';
-  const root = (state.boot?.root || '').replace(/\\+$/, '');
-  if (root && path.toLowerCase().startsWith(`${root.toLowerCase()}\\`)) {
+  const win = isWindowsHost();
+  const sep = win ? '\\' : '/';
+  // Windows paths are case-insensitive; Linux paths are not.
+  const norm = (value) => (win ? value.toLowerCase() : value);
+  const root = (state.boot?.root || '').replace(win ? /\\+$/ : /\/+$/, '');
+  if (root && norm(path).startsWith(`${norm(root)}${sep}`)) {
     return path.slice(root.length + 1);
   }
   return path;
@@ -1529,6 +1560,16 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
   videoEl.pause();
   videoEl.removeAttribute('src');
   videoEl.load();
+
+  // WebView2 always has MediaSource; WebKitGTK builds may not. Fail with a
+  // clear hint instead of a ReferenceError deeper in the setup.
+  if (!window.MediaSource) {
+    if (freeze) freeze.remove();
+    videoEl.controls = true;
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = '<div class="player-error">This webview has no MediaSource support, so the built-in player cannot run. Turn off "Built-in player" in Settings to play converted files instead.</div>';
+    return;
+  }
 
   const ms = new MediaSource();
   const objectUrl = URL.createObjectURL(ms);
@@ -3623,9 +3664,9 @@ function viewSettings() {
         ${b.ffmpegOk
           ? `<div class="kv">Ready. Using <code>${esc(b.ffmpegDir || '')}</code></div>`
           : `<p class="warn small" style="margin-top:0">Not found. Thumbnails and playback of MKV/FLV/WMV need ffmpeg.</p>
-             <p class="muted small">Install with <code>winget install Gyan.FFmpeg</code> or point to the folder that contains ffmpeg.exe and ffprobe.exe.</p>`}
+             <p class="muted small">Install with <code>${esc(ffmpegInstallCommand())}</code> or point to the folder that contains ${esc(ffmpegBinaryNames())}.</p>`}
         <div class="path-row" style="margin-top:10px">
-          <input class="input" id="set-ffmpeg" placeholder="C:\\path\\to\\ffmpeg\\bin" value="${esc(b.ffmpegDir || '')}">
+          <input class="input" id="set-ffmpeg" placeholder="${esc(ffmpegDirPlaceholder())}" value="${esc(b.ffmpegDir || '')}">
           <button class="btn" id="set-ffmpeg-save">Apply</button>
         </div>
       </section>

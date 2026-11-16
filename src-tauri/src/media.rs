@@ -179,6 +179,28 @@ fn classify(
     }
 }
 
+/// Binary names differ per platform: Windows ships `.exe` files, Unix systems
+/// use bare names on `PATH`.
+#[cfg(windows)]
+const FFMPEG_BIN: &str = "ffmpeg.exe";
+#[cfg(windows)]
+const FFPROBE_BIN: &str = "ffprobe.exe";
+#[cfg(not(windows))]
+const FFMPEG_BIN: &str = "ffmpeg";
+#[cfg(not(windows))]
+const FFPROBE_BIN: &str = "ffprobe";
+
+/// Command that installs ffmpeg, used in user-facing error messages.
+pub fn ffmpeg_install_hint() -> &'static str {
+    if cfg!(windows) {
+        "winget install Gyan.FFmpeg"
+    } else if cfg!(target_os = "macos") {
+        "brew install ffmpeg"
+    } else {
+        "sudo apt install ffmpeg (Debian/Ubuntu) or sudo pacman -S ffmpeg (Arch)"
+    }
+}
+
 pub fn detect_ffmpeg(override_dir: Option<&str>) -> Option<Ffmpeg> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(d) = override_dir.filter(|d| !d.trim().is_empty()) {
@@ -187,33 +209,53 @@ pub fn detect_ffmpeg(override_dir: Option<&str>) -> Option<Ffmpeg> {
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));
     }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let local = PathBuf::from(local);
-        dirs.push(local.join("Microsoft").join("WinGet").join("Links"));
-        let packages = local.join("Microsoft").join("WinGet").join("Packages");
-        if let Ok(entries) = std::fs::read_dir(&packages) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.starts_with("gyan.ffmpeg") {
-                    dirs.push(entry.path().join("bin"));
-                    if let Ok(inner) = std::fs::read_dir(entry.path()) {
-                        for sub in inner.flatten() {
-                            dirs.push(sub.path().join("bin"));
+
+    // Common install locations, in case the app was started with a minimal PATH
+    // (desktop launchers often only provide /usr/local/bin:/usr/bin:/bin).
+    #[cfg(not(windows))]
+    {
+        dirs.extend([
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/snap/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/var/lib/flatpak/exports/bin"),
+        ]);
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join(".local").join("bin"));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let local = PathBuf::from(local);
+            dirs.push(local.join("Microsoft").join("WinGet").join("Links"));
+            let packages = local.join("Microsoft").join("WinGet").join("Packages");
+            if let Ok(entries) = std::fs::read_dir(&packages) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_lowercase();
+                    if name.starts_with("gyan.ffmpeg") {
+                        dirs.push(entry.path().join("bin"));
+                        if let Ok(inner) = std::fs::read_dir(entry.path()) {
+                            for sub in inner.flatten() {
+                                dirs.push(sub.path().join("bin"));
+                            }
                         }
                     }
                 }
             }
+            dirs.push(local.join("Programs").join("ffmpeg").join("bin"));
         }
-        dirs.push(local.join("Programs").join("ffmpeg").join("bin"));
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            dirs.push(PathBuf::from(pf).join("ffmpeg").join("bin"));
+        }
+        dirs.push(PathBuf::from(r"C:\ffmpeg\bin"));
     }
-    if let Some(pf) = std::env::var_os("ProgramFiles") {
-        dirs.push(PathBuf::from(pf).join("ffmpeg").join("bin"));
-    }
-    dirs.push(PathBuf::from(r"C:\ffmpeg\bin"));
 
     for dir in dirs {
-        let ffmpeg = dir.join("ffmpeg.exe");
-        let ffprobe = dir.join("ffprobe.exe");
+        let ffmpeg = dir.join(FFMPEG_BIN);
+        let ffprobe = dir.join(FFPROBE_BIN);
         if ffmpeg.is_file() && ffprobe.is_file() {
             return Some(Ffmpeg { ffmpeg, ffprobe });
         }

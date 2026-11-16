@@ -41,6 +41,8 @@ Priority: optional
 Architecture: amd64
 Installed-Size: ${INSTALLED_SIZE}
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0t64 | libgtk-3-0, libsoup-3.0-0, libayatana-appindicator3-1
+Recommends: ffmpeg
+Suggests: xdg-utils
 Maintainer: Leetdog <buddyLeetdog@users.noreply.github.com>
 Homepage: https://github.com/buddyLeetdog/splashhound
 Description: Local-first video library categorizer and viewer

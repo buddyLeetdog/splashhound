@@ -245,21 +245,42 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
     Ok(())
 }
 
+/// Compare two path prefixes. Windows paths are case-insensitive; Unix paths
+/// are not, so `/Videos` and `/videos` must stay distinct.
+fn prefix_eq(a: &[u8], b: &[u8]) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// Whether two stored paths name the same location on this platform.
+pub fn same_path(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
 /// Strip the library root from an absolute path, returning the portable part.
 pub fn relative_to(path: &str, root: &str) -> Option<String> {
     let root = root.trim_end_matches(['\\', '/']);
     if root.is_empty() {
         return None;
     }
-    let prefix = format!("{root}\\");
-    if path.len() <= prefix.len() {
-        return None;
+    // Accept either separator: Windows stores `\`, Unix stores `/`, and a root
+    // entered with a trailing separator may differ from the stored files.
+    for sep in ['\\', '/'] {
+        let prefix = format!("{root}{sep}");
+        if path.len() > prefix.len()
+            && prefix_eq(&path.as_bytes()[..prefix.len()], prefix.as_bytes())
+        {
+            return Some(path[prefix.len()..].to_string());
+        }
     }
-    if path.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes()) {
-        Some(path[prefix.len()..].to_string())
-    } else {
-        None
-    }
+    None
 }
 
 /// Fill in `rel_path` for rows stored under `root` (migration + first scan).
@@ -294,7 +315,9 @@ pub fn repath_library(conn: &mut Connection, new_root: &str) -> Result<usize> {
     let tx = conn.transaction()?;
     let mut moved = 0;
     for (id, rel) in rows {
-        let new_path = format!("{root}\\{rel}");
+        // `Path::join` uses the platform separator, so this works for both
+        // `D:\New\sub\a.mp4` and `/new/sub/a.mp4`.
+        let new_path = Path::new(&root).join(&rel).to_string_lossy().to_string();
         if tx.execute(
             "UPDATE OR IGNORE videos SET path = ?1 WHERE id = ?2",
             params![new_path, id],
@@ -321,7 +344,10 @@ pub fn repath_trash(conn: &mut Connection, old_root: &str, new_root: &str) -> Re
         if let Some(rel) = relative_to(&path, old_root) {
             tx.execute(
                 "UPDATE trash SET original_path = ?1 WHERE id = ?2",
-                params![format!("{root}\\{rel}"), id],
+                params![
+                    Path::new(&root).join(&rel).to_string_lossy().to_string(),
+                    id
+                ],
             )?;
             moved += 1;
         }
@@ -598,6 +624,13 @@ pub struct VideoFilter {
     pub offset: i64,
 }
 
+/// Prefix used by the folder filter. The stored paths use the platform
+/// separator, so build the prefix the same way instead of assuming `\`.
+fn folder_prefix(dir: &str) -> String {
+    let trimmed = dir.trim_end_matches(['\\', '/']);
+    format!("{trimmed}{}", std::path::MAIN_SEPARATOR)
+}
+
 fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
     let mut clauses: Vec<String> = vec!["v.missing = 0".into()];
     let mut vals: Vec<SqlValue> = Vec::new();
@@ -687,7 +720,7 @@ fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
         vals.push(SqlValue::Text(c.to_string()));
     }
     if let Some(dir) = f.folder.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-        let prefix = format!("{}\\", dir.trim_end_matches('\\'));
+        let prefix = folder_prefix(dir);
         clauses.push("substr(v.path, 1, length(?)) = ?".into());
         vals.push(SqlValue::Text(prefix.clone()));
         vals.push(SqlValue::Text(prefix));
@@ -738,7 +771,7 @@ pub fn rating_queue(conn: &Connection, limit: i64, folder: Option<&str>) -> Resu
     let mut where_sql = String::from("v.missing = 0 AND v.reviewed = 0");
     let mut vals: Vec<SqlValue> = Vec::new();
     if let Some(dir) = folder.map(str::trim).filter(|d| !d.is_empty()) {
-        let prefix = format!("{}\\", dir.trim_end_matches('\\'));
+        let prefix = folder_prefix(dir);
         where_sql.push_str(" AND substr(v.path, 1, length(?1)) = ?1");
         vals.push(SqlValue::Text(prefix));
     }
@@ -2001,6 +2034,16 @@ mod tests {
             Some("a.mp4".to_string())
         );
         assert_eq!(relative_to(r"D:\Lib\a.mp4", ""), None);
+        // Unix-style roots and paths use `/` and must work the same way.
+        assert_eq!(
+            relative_to("/home/u/videos/a/b.mp4", "/home/u/videos"),
+            Some("a/b.mp4".to_string())
+        );
+        assert_eq!(relative_to("/home/u/videos/a.mp4", "/home/u/video"), None);
+        assert_eq!(
+            relative_to("/home/u/videos/a.mp4", "/home/u/videos/"),
+            Some("a.mp4".to_string())
+        );
     }
 
     #[test]

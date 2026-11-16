@@ -280,11 +280,11 @@ pub async fn run_scan(state: Arc<AppState>) {
             }
             None => {
                 update(&state, |s| {
-                    s.error = Some(
+                    s.error = Some(format!(
                         "ffprobe was not found, so durations and codecs could not be read. \
-                         Install ffmpeg (winget install Gyan.FFmpeg) and scan again."
-                            .into(),
-                    )
+                         Install ffmpeg ({}) and scan again.",
+                        media::ffmpeg_install_hint()
+                    ))
                 });
             }
         }

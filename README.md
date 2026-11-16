@@ -12,17 +12,24 @@ generated preview frames.
 
 ## Requirements
 
-- Windows 10/11 with the WebView2 runtime (preinstalled on current Windows)
+- Windows 10/11 with the WebView2 runtime (preinstalled on current Windows), or
+  Linux with WebKitGTK 4.1 (Ubuntu 24.04+, Debian 13+, current Arch)
 - [ffmpeg](https://ffmpeg.org/) — required for previews and for playing
-  formats WebView2 cannot decode natively (MKV, FLV, WMV, AVI, …)
+  formats the webview cannot decode natively (MKV, FLV, WMV, AVI, …)
 
 ```powershell
-winget install Gyan.FFmpeg
+winget install Gyan.FFmpeg        # Windows
+```
+
+```bash
+sudo apt install ffmpeg           # Debian / Ubuntu
+sudo pacman -S ffmpeg             # Arch
 ```
 
 The app also auto-detects ffmpeg installed to a custom folder via
 **Settings → ffmpeg**. On the first launch without ffmpeg it shows a setup
-prompt with the install command and a "Check again" button.
+prompt with the install command for the current platform and a "Check again"
+button.
 
 ## Install (prebuilt)
 
@@ -312,6 +319,11 @@ Headless indexing (also used for manual verification):
 ```powershell
 splashhound.exe --scan "D:\path\to\videos"
 splashhound.exe --scan "D:\path\to\videos" --serve   # keep the media server up
+```
+
+```bash
+./splashhound --scan "$HOME/Videos"
+./splashhound --scan "$HOME/Videos" --serve
 ```
 
 Debug builds accept remote debugging through WebView2:

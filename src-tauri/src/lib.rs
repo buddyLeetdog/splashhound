@@ -412,7 +412,7 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>
 }
 
 /// Headless indexing pass, used for development verification:
-/// `splashhound.exe --scan <folder>`
+/// `splashhound --scan <folder>`
 pub fn headless_scan(dir: PathBuf, serve: bool) {
     let base = std::env::temp_dir().join("splashhound-headless");
     let _ = std::fs::remove_dir_all(&base);

@@ -39,6 +39,9 @@ pub struct Bootstrap {
     pub creators: Vec<String>,
     pub scan: ScanStatus,
     pub version: String,
+    /// `std::env::consts::OS` so the UI can show platform-appropriate install
+    /// commands and path placeholders.
+    pub os: String,
 }
 
 #[tauri::command]
@@ -78,6 +81,7 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
             destruction: st.setting("show_destruction").as_deref() != Some("0"),
         },
         discreet: st.setting("discreet").as_deref() == Some("1"),
+        os: std::env::consts::OS.to_string(),
         ffmpeg_dir: ff.map(|f| {
             f.ffmpeg
                 .parent()
@@ -142,7 +146,7 @@ pub async fn set_root(state: State<'_, Arc<AppState>>, path: String) -> Result<R
         if !old_root.is_empty() {
             let _ = db::backfill_rel_paths(&conn, &old_root);
         }
-        let same_as_before = !old_root.is_empty() && old_root.eq_ignore_ascii_case(&new_root);
+        let same_as_before = !old_root.is_empty() && db::same_path(&old_root, &new_root);
         if same_as_before {
             let _ = db::backfill_rel_paths(&conn, &new_root);
             (0, false)
@@ -596,11 +600,11 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             state: "error".into(),
             url: None,
             progress: 0.0,
-            error: Some(
+            error: Some(format!(
                 "ffmpeg was not found, so this file cannot be played. \
-                 Install ffmpeg (winget install Gyan.FFmpeg) and restart the app."
-                    .into(),
-            ),
+                 Install ffmpeg ({}) and restart the app.",
+                media::ffmpeg_install_hint()
+            )),
             stream_mime: None,
         };
     }
@@ -644,11 +648,11 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             state: "error".into(),
             url: None,
             progress: 0.0,
-            error: Some(
+            error: Some(format!(
                 "ffmpeg was not found, so this file cannot be converted for playback. \
-                 Install ffmpeg (winget install Gyan.FFmpeg) and restart the app."
-                    .into(),
-            ),
+                 Install ffmpeg ({}) and restart the app.",
+                media::ffmpeg_install_hint()
+            )),
             stream_mime: None,
         };
     }
@@ -791,6 +795,32 @@ pub async fn reveal(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), Stri
         command.raw_arg(format!("/select,\"{}\"", video.path));
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         command.spawn().map_err(err)?;
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        let spawned = std::process::Command::new("open")
+            .args(["-R", &video.path])
+            .spawn();
+        #[cfg(not(target_os = "macos"))]
+        let spawned = {
+            // Linux: open the containing folder with the desktop's handler.
+            // `xdg-open` comes from xdg-utils; `gio` is always available with
+            // GTK and is a useful fallback on minimal installs.
+            let parent = Path::new(&video.path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."));
+            std::process::Command::new("xdg-open")
+                .arg(parent)
+                .spawn()
+                .or_else(|_| {
+                    std::process::Command::new("gio")
+                        .arg("open")
+                        .arg(parent)
+                        .spawn()
+                })
+        };
+        spawned.map_err(|e| format!("could not open the file manager: {e}"))?;
     }
     Ok(())
 }
