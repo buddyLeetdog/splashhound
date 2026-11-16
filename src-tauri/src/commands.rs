@@ -524,9 +524,10 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
     let mode = video.playback.clone();
 
     // The built-in stream player decodes anything ffmpeg can read and writes a
-    // constant frame rate, so it also fixes stuttering VFR files. Checked before
-    // the direct path because VFR files usually have a perfectly valid codec.
-    if (mode == "transcode" || video.vfr) && st.setting("native_player").as_deref() != Some("0") {
+    // constant frame rate, so it also fixes stuttering VFR files. Remux cases
+    // (browser codec, unusual container or audio) used to be copied into the
+    // cache first, which cost several seconds per file; they stream instead.
+    if (mode != "direct" || video.vfr) && st.setting("native_player").as_deref() != Some("0") {
         let (_, codec) = stream::profile_for(video.width, video.height);
         return PlaybackInfo {
             mode: "stream".into(),

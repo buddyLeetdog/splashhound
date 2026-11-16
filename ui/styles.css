@@ -270,6 +270,8 @@ label { color: var(--muted); font-size: 12px; display: block; margin-bottom: 4px
   font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--accent); opacity: 0.85;
 }
+/* Clicking the picture toggles playback, like the native player. */
+.stream-video { cursor: pointer; }
 /* Freeze frame shown while a seek restarts the decoder. */
 .seek-freeze {
   position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2;

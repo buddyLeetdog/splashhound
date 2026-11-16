@@ -1628,6 +1628,10 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
   let playing = false;
   let pendingTarget = null;
   let seekTimer = null;
+  // Declared here so `stop()` can detach them; they are assigned below.
+  let clickTimer = null;
+  let onVideoClick = null;
+  let onVideoDoubleClick = null;
 
   const fmt = (s) => {
     const total = Math.max(0, Math.floor(s || 0));
@@ -1795,7 +1799,27 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
       paintVolume();
     };
     $('.sc-full', controls).onclick = toggleFullscreen;
-    videoEl.addEventListener('dblclick', toggleFullscreen);
+    // Click to pause/play, like the standard player; a double click must not
+    // toggle twice on its way to fullscreen.
+    onVideoClick = () => {
+      if (clickTimer) return;
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        if (videoEl.paused) videoEl.play().catch(() => {});
+        else videoEl.pause();
+      }, 220);
+    };
+    onVideoDoubleClick = (event) => {
+      event.preventDefault();
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+      }
+      toggleFullscreen();
+    };
+    videoEl.classList.add('stream-video');
+    videoEl.addEventListener('click', onVideoClick);
+    videoEl.addEventListener('dblclick', onVideoDoubleClick);
     const setButton = () => {
       playing = !videoEl.paused;
       playBtn.textContent = playing ? '\u23f8' : '\u25b6';
@@ -1874,9 +1898,12 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
     stop() {
       stopped = true;
       if (seekTimer) clearTimeout(seekTimer);
+      if (clickTimer) clearTimeout(clickTimer);
       if (creditTimer) clearInterval(creditTimer);
       videoEl.removeEventListener('seeking', onSeeking);
-      videoEl.removeEventListener('dblclick', toggleFullscreen);
+      if (onVideoClick) videoEl.removeEventListener('click', onVideoClick);
+      if (onVideoDoubleClick) videoEl.removeEventListener('dblclick', onVideoDoubleClick);
+      videoEl.classList.remove('stream-video');
       document.removeEventListener('fullscreenchange', onFullscreenChange);
       window.removeEventListener('resize', onWindowResize);
       if (freeze) freeze.remove();
@@ -1895,6 +1922,14 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
 }
 
 /* ------------------------------ player ---------------------------------- */
+
+/** What will actually play the file: the built-in player handles anything that
+ *  is not directly playable by the webview. */
+function playbackText(v) {
+  const native = state.boot?.nativePlayer;
+  if (native && (v.playback !== 'direct' || v.vfr)) return 'stream (built-in player)';
+  return v.playback;
+}
 
 function playVideo(videoEl, overlay, video, onReady) {
   const token = ++state.playerToken;
@@ -2018,7 +2053,7 @@ function detailRightHtml(v, ids, index) {
       <dt>Resolution</dt><dd>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</dd>
       <dt>Frame rate</dt><dd>${v.fps ? `${fmtFps(v.fps)}${v.vfr ? ' <span class="warn-inline">(variable)</span>' : ''}` : '-'}</dd>
       <dt>Codecs</dt><dd>${esc(v.vcodec || '?')} / ${esc(v.acodec || 'no audio')}</dd>
-      <dt>Playback</dt><dd>${esc(v.playback)}</dd>
+      <dt>Playback</dt><dd>${esc(playbackText(v))}</dd>
       <dt>MD5</dt><dd class="mono">${esc(v.md5 || 'not hashed yet')}</dd>
       <dt>Views</dt><dd>${v.viewCount}</dd>
       <dt>Added</dt><dd>${fmtDate(v.addedAt)}</dd>
@@ -2273,7 +2308,7 @@ function renderRateCurrent() {
           <dt>Size</dt><dd>${fmtSize(v.size)}</dd>
           <dt>Resolution</dt><dd>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</dd>
           <dt>Frame rate</dt><dd>${v.fps ? `${fmtFps(v.fps)}${v.vfr ? ' <span class="warn-inline">(variable)</span>' : ''}` : '-'}</dd>
-          <dt>Playback</dt><dd>${esc(v.playback)}</dd>
+          <dt>Playback</dt><dd>${esc(playbackText(v))}</dd>
         </dl>
         <div id="r-editor">
           ${editorHtml(v, 'r', true)}

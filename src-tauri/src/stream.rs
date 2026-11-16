@@ -465,8 +465,21 @@ async fn stream_with(
 ) -> Result<usize, (String, usize)> {
     let mut buf = vec![0u8; 64 * 1024];
     let mut sent = 0usize;
+    let opened_at = now_ms();
     loop {
         let ahead_ms = ahead.load(std::sync::atomic::Ordering::Relaxed);
+        let last = last_report.load(std::sync::atomic::Ordering::Relaxed);
+        // Safety net: a player that stopped reporting is gone (closed window,
+        // crashed renderer). Without this the encoder could idle forever when the
+        // socket never delivers a close frame.
+        let silent = if last == 0 {
+            now_ms().saturating_sub(opened_at) > 8_000
+        } else {
+            now_ms().saturating_sub(last) > 12_000
+        };
+        if silent {
+            return Ok(sent);
+        }
         // Stop reading from ffmpeg once the client is far enough ahead; the
         // pipe backpressure pauses the encoder without killing it.
         if ahead_ms > window_ms {
@@ -475,10 +488,8 @@ async fn stream_with(
                 _ = &mut *closed => return Ok(sent),
             }
         }
-        // Safety net: if the player stopped reporting, pace the encoder instead
-        // of buffering the rest of the file into memory.
-        let last = last_report.load(std::sync::atomic::Ordering::Relaxed);
-        if last == 0 || now_ms().saturating_sub(last) > 3_000 {
+        // Wait for the first buffer report before racing ahead.
+        if last == 0 && now_ms().saturating_sub(opened_at) > 1_500 {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
                 _ = &mut *closed => return Ok(sent),
