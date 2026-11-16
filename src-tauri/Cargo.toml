@@ -1,9 +1,12 @@
 [package]
 name = "splashhound"
-version = "0.1.0"
+version = "1.0.0"
 description = "Splashhound - video library categorizer and viewer"
 edition = "2021"
 rust-version = "1.77"
+license = "GPL-3.0-only"
+authors = ["Leetdog"]
+repository = "https://github.com/buddyLeetdog/splashhound"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

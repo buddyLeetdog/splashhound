@@ -5,6 +5,7 @@
 # Local sample media (large binaries, not source)
 /example videos/
 /example pics/
+/example pics/
 
 # OS / editor cruft
 *.log

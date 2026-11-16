@@ -1,5 +1,7 @@
 # Splashhound
 
+Created by **Leetdog**.
+
 A local-first desktop tool for indexing, categorizing and browsing a video
 collection. Built with Rust + Tauri 2, SQLite for the library, and a plain
 HTML/JS frontend rendered in WebView2.
@@ -21,6 +23,19 @@ winget install Gyan.FFmpeg
 The app also auto-detects ffmpeg installed to a custom folder via
 **Settings → ffmpeg**. On the first launch without ffmpeg it shows a setup
 prompt with the install command and a "Check again" button.
+
+## Install (prebuilt)
+
+Prebuilt binaries are attached to
+[Releases](https://github.com/buddyLeetdog/splashhound/releases):
+
+- **Windows**: unzip `splashhound-windows-x64.zip` and run `splashhound.exe`.
+  WebView2 is required (preinstalled on Windows 10/11); ffmpeg is recommended.
+- **Linux**: unpack `splashhound-linux-x64.tar.gz` and run `./splashhound`.
+  Requires WebKitGTK 4.1, GTK 3 and libayatana-appindicator (Ubuntu 24.04:
+  `libwebkit2gtk-4.1-0 libayatana-appindicator3-1`; Arch: `webkit2gtk-4.1`).
+
+The Windows and Linux builds are produced by GitHub Actions for every `v*` tag.
 
 ## Running
 

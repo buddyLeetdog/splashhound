@@ -2768,6 +2768,7 @@ function viewSettings() {
       <section class="panel">
         <h2>About</h2>
         <div class="kv">Splashhound ${esc(b.version || '')}</div>
+        <div class="kv">Created by Leetdog</div>
         <div class="kv">Local-only app. No network access beyond 127.0.0.1 media streaming.</div>
         <div class="kv">Media cache is served on <code>${esc(b.mediaBase || '')}</code></div>
       </section>
