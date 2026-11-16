@@ -153,6 +153,7 @@ function modal(html, options = {}) {
 function confirmDialog({ title, message, okLabel = 'Confirm', danger = false }) {
   return new Promise((resolve) => {
     let settled = false;
+    let onKey = null;
     const finish = (value) => {
       if (!settled) { settled = true; resolve(value); }
     };
@@ -165,13 +166,32 @@ function confirmDialog({ title, message, okLabel = 'Confirm', danger = false }) 
        </div>`,
       {
         onMount(root, close) {
-          $('#dlg-ok', root).onclick = () => { finish(true); close(); };
+          const okButton = $('#dlg-ok', root);
+          // Enter confirms, Backspace cancels. Escape is handled by the global
+          // modal handler, which runs onClose below.
+          onKey = (e) => {
+            if (e.key === 'Enter' || e.key === 'NumpadEnter') {
+              e.preventDefault();
+              finish(true);
+              close();
+            } else if (e.key === 'Backspace') {
+              e.preventDefault();
+              finish(false);
+              close();
+            }
+          };
+          document.addEventListener('keydown', onKey);
+          okButton.onclick = () => { finish(true); close(); };
+          okButton.focus();
           $$('[data-close]', root).forEach((b) => b.addEventListener('click', () => finish(false)));
           $('.modal-backdrop', root).addEventListener('mousedown', (e) => {
             if (e.target.classList.contains('modal-backdrop')) finish(false);
           });
         },
-        onClose() { finish(false); },
+        onClose() {
+          if (onKey) document.removeEventListener('keydown', onKey);
+          finish(false);
+        },
       },
     );
   });
@@ -212,6 +232,11 @@ function promptDialog(title, label, initial = '') {
             if (e.key === 'Enter') {
               e.preventDefault();
               submit();
+            } else if (e.key === 'Backspace' && !input.value) {
+              // Empty field: Backspace cancels instead of doing nothing.
+              e.preventDefault();
+              finish(null);
+              close();
             }
           });
           $$('[data-close]', root).forEach((b) => b.addEventListener('click', () => finish(null)));
