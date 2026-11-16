@@ -22,6 +22,11 @@ use crate::AppState;
 /// actually use (missing GPU, driver or session limit).
 const HW_CANDIDATES: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi"];
 
+/// How far ahead of the playhead the decoder may run. Everything inside this
+/// window can be seeked without restarting the encoder, so 15 s makes most
+/// seeks instant at the cost of a few MB of buffered video.
+const MAX_AHEAD_MS: u64 = 15_000;
+
 static HW_ENCODER: OnceLock<Option<&'static str>> = OnceLock::new();
 
 /// Encoder level derived from the source resolution: the MSE codec string on
@@ -92,7 +97,7 @@ fn encoder_args(name: &str, level: &str, gop: i64) -> Vec<String> {
             "-c:v",
             "h264_nvenc",
             "-preset",
-            "p4",
+            "p1",
             "-tune",
             "ll",
             "-rc",
@@ -195,6 +200,13 @@ impl Drop for Decoder {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn quiet_command(program: &std::path::Path) -> tokio::process::Command {
     let mut cmd = std::process::Command::new(program);
     #[cfg(windows)]
@@ -217,8 +229,6 @@ fn build_command(
 ) -> tokio::process::Command {
     let mut cmd = quiet_command(ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin"]);
-    // Realtime pacing keeps the buffer small; seeking opens a new connection.
-    cmd.args(["-re"]);
     if start > 0.5 {
         cmd.arg("-ss").arg(format!("{start:.3}"));
     }
@@ -256,12 +266,29 @@ fn build_command(
 
 async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
+    // How much video the client currently has buffered, in milliseconds. Used to
+    // throttle the decoder: it runs ahead of the playhead instead of in realtime,
+    // so seeking inside that window needs no new encoder run.
+    let ahead = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let ahead_reader = ahead.clone();
+    let last_report = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let last_report_reader = last_report.clone();
     // Watches for the player going away. Closing the modal or switching video
     // must stop the encoder even while it is blocked writing.
     let mut closed = tokio::spawn(async move {
         while let Some(message) = stream.next().await {
             match message {
                 Ok(Message::Close(_)) | Err(_) => return,
+                Ok(Message::Text(text)) => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(ms) = value.get("ahead").and_then(|v| v.as_f64()) {
+                            ahead_reader
+                                .store(ms.max(0.0) as u64, std::sync::atomic::Ordering::Relaxed);
+                            last_report_reader
+                                .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -313,7 +340,17 @@ async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebS
 
         // Hand the socket to the first encoder that produces data; if it dies
         // early, fall back to the next one (hardware -> software).
-        match stream_with(&mut sink, &mut closed, &mut stdout, &mut stderr, encoder).await {
+        match stream_with(
+            &mut sink,
+            &mut closed,
+            &mut stdout,
+            &mut stderr,
+            encoder,
+            &ahead,
+            &last_report,
+        )
+        .await
+        {
             Ok(bytes) => {
                 sent = bytes;
                 child = Some(guard);
@@ -353,10 +390,30 @@ async fn stream_with(
     stdout: &mut tokio::process::ChildStdout,
     stderr: &mut tokio::process::ChildStderr,
     encoder: &str,
+    ahead: &std::sync::atomic::AtomicU64,
+    last_report: &std::sync::atomic::AtomicU64,
 ) -> Result<usize, (String, usize)> {
     let mut buf = vec![0u8; 64 * 1024];
     let mut sent = 0usize;
     loop {
+        let ahead_ms = ahead.load(std::sync::atomic::Ordering::Relaxed);
+        // Stop reading from ffmpeg once the client is far enough ahead; the
+        // pipe backpressure pauses the encoder without killing it.
+        if ahead_ms > MAX_AHEAD_MS {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(80)) => continue,
+                _ = &mut *closed => return Ok(sent),
+            }
+        }
+        // Safety net: if the player stopped reporting, pace the encoder instead
+        // of buffering the rest of the file into memory.
+        let last = last_report.load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 || now_ms().saturating_sub(last) > 3_000 {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                _ = &mut *closed => return Ok(sent),
+            }
+        }
         let read = tokio::select! {
             read = stdout.read(&mut buf) => read,
             _ = &mut *closed => return Ok(sent),

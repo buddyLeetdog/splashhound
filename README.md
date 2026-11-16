@@ -265,11 +265,12 @@ stutter because the output timestamps are uniform.
 
 - **Encoder**: the best hardware encoder the machine can actually use
   (`h264_nvenc`, `h264_qsv`, `h264_amf`, `h264_vaapi` — each is test-encoded once)
-  with `libx264` as fallback. Measured on an RTX 5060 Ti: 0.16 CPU cores vs 0.6
-  with software at 1080p.
-- **Seeking**: the last frame is held while the decoder restarts at the target,
-  the clock jumps immediately, and repeated scrubs are coalesced. A seek settles
-  in roughly 0.3–0.4 s.
+  with `libx264` as fallback. Measured on an RTX 5060 Ti: 0.18 CPU cores steady
+  at 1080p, against 0.61 with software.
+- **Seeking**: the decoder runs up to 15 s ahead of the playhead and the player
+  reports how far ahead it is, so any seek inside that window jumps without
+  restarting the encoder (instant). Bigger jumps restart it at the target while
+  the last frame is held, and settle in roughly 0.3–0.5 s.
 - **Controls**: play/pause, scrub bar, volume/mute, fullscreen (button, `F11` or
   double-click), badges. Hotkeys: `Space`, `M`, `↑`/`↓`,
   `Shift`/`Ctrl`+`←`/`→`, `F11`.

@@ -1469,6 +1469,8 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
   let source = null;
   let stopped = false;
   let started = false;
+  let creditTimer = null;
+  let receivedBytes = 0;
   const queue = [];
 
   const fail = (message) => {
@@ -1509,6 +1511,25 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
 
     ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
+    // Tell the server how far ahead we are, so it can run ahead of realtime and
+    // pause when the buffer is full. Seeks inside that buffer need no restart.
+    creditTimer = setInterval(() => {
+      if (stopped || !ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        // Count queued bytes as "ahead" too: the server writes faster than MSE
+        // appends, so the buffered time alone under-reports what is in flight.
+        let queued = 0;
+        for (let i = 0; i < queue.length; i += 1) queued += queue[i].length;
+        const mediaEnd = videoEl.buffered.length
+          ? videoEl.buffered.end(videoEl.buffered.length - 1)
+          : 0;
+        const bytesPerSecond = mediaEnd > 0.5 ? receivedBytes / mediaEnd : 0;
+        const queuedMs = bytesPerSecond > 0 ? (queued / bytesPerSecond) * 1000 : 0;
+        ws.send(JSON.stringify({ ahead: Math.round(bufferedAhead() + queuedMs) }));
+      } catch (err) {
+        /* ignore */
+      }
+    }, 300);
     ws.onmessage = (event) => {
       if (stopped || token !== state.playerToken) return;
       if (typeof event.data === 'string') {
@@ -1516,6 +1537,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
         return;
       }
       queue.push(new Uint8Array(event.data));
+      receivedBytes += event.data.byteLength;
       pump();
     };
     ws.onclose = () => {
@@ -1559,6 +1581,31 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
     // past the last frame and the picture would stay frozen on the held frame.
     const max = duration > 2 ? duration - 1 : duration || t;
     return Math.max(0, Math.min(t, max));
+  };
+
+  /** Seconds of video already decoded ahead of the playhead. */
+  const bufferedAhead = () => {
+    const ranges = videoEl.buffered;
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (videoEl.currentTime >= ranges.start(i) - 0.1 && videoEl.currentTime <= ranges.end(i)) {
+        return Math.max(0, (ranges.end(i) - videoEl.currentTime) * 1000);
+      }
+    }
+    return 0;
+  };
+
+  /** Seek inside the buffered range without restarting the decoder. */
+  const seekWithinBuffer = (target) => {
+    const offset = target - base;
+    const ranges = videoEl.buffered;
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (offset >= ranges.start(i) + 0.25 && offset <= ranges.end(i) - 0.25) {
+        videoEl.currentTime = offset;
+        videoEl.play().catch(() => {});
+        return true;
+      }
+    }
+    return false;
   };
 
   const paint = () => {
@@ -1707,13 +1754,25 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
   streamPlayer = {
     /** Jump to an absolute position (seconds). */
     seek(seconds) {
-      pendingTarget = clamp(seconds);
+      const target = clamp(seconds);
+      if (seekWithinBuffer(target)) {
+        pendingTarget = null;
+        paint();
+        return;
+      }
+      pendingTarget = target;
       scheduleSeek();
     },
     /** Relative seek, counted from a pending jump if there is one. */
     seekBy(delta) {
       const from = pendingTarget !== null ? pendingTarget : base + (videoEl.currentTime || 0);
-      pendingTarget = clamp(from + delta);
+      const target = clamp(from + delta);
+      if (seekWithinBuffer(target)) {
+        pendingTarget = null;
+        paint();
+        return;
+      }
+      pendingTarget = target;
       scheduleSeek();
     },
     position() {
@@ -1735,6 +1794,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) 
     stop() {
       stopped = true;
       if (seekTimer) clearTimeout(seekTimer);
+      if (creditTimer) clearInterval(creditTimer);
       videoEl.removeEventListener('seeking', onSeeking);
       videoEl.removeEventListener('dblclick', toggleFullscreen);
       document.removeEventListener('fullscreenchange', onFullscreenChange);
