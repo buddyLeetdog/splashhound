@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -18,10 +18,8 @@ jobs:
         include:
           - os: windows-latest
             name: windows-x64
-            asset: splashhound-windows-x64.zip
           - os: ubuntu-24.04
             name: linux-x64
-            asset: splashhound-linux-x64.tar.gz
 
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +52,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path "src-tauri/target/release/splashhound.exe", "README.md", "LICENSE" `
-            -DestinationPath "${{ matrix.asset }}" -Force
+            -DestinationPath "splashhound-windows-x64.zip" -Force
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -62,11 +60,32 @@ jobs:
           mkdir -p dist
           cp src-tauri/target/release/splashhound dist/
           cp README.md LICENSE dist/
-          tar -czf "${{ matrix.asset }}" -C dist .
+          tar -czf "splashhound-linux-x64.tar.gz" -C dist .
+          bash packaging/linux/build_deb.sh "${GITHUB_REF_NAME#v}"
 
-      - name: Publish release asset
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            splashhound-windows-x64.zip
+            splashhound-linux-x64.tar.gz
+            dist/splashhound_*_amd64.deb
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: artifacts/*
           generate_release_notes: true
           fail_on_unmatched_files: true

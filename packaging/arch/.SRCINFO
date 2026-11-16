@@ -1,0 +1,17 @@
+pkgbase = splashhound
+	pkgdesc = Local-first video library categorizer and viewer
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/buddyLeetdog/splashhound
+	arch = x86_64
+	license = GPL-3.0-only
+	makedepends = rust
+	makedepends = pkgconf
+	depends = webkit2gtk-4.1
+	depends = gtk3
+	depends = libsoup3
+	depends = libayatana-appindicator
+	source = splashhound-1.0.0.tar.gz::https://github.com/buddyLeetdog/splashhound/archive/refs/tags/v1.0.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = splashhound

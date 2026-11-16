@@ -31,11 +31,19 @@ Prebuilt binaries are attached to
 
 - **Windows**: unzip `splashhound-windows-x64.zip` and run `splashhound.exe`.
   WebView2 is required (preinstalled on Windows 10/11); ffmpeg is recommended.
-- **Linux**: unpack `splashhound-linux-x64.tar.gz` and run `./splashhound`.
-  Requires WebKitGTK 4.1, GTK 3 and libayatana-appindicator (Ubuntu 24.04:
-  `libwebkit2gtk-4.1-0 libayatana-appindicator3-1`; Arch: `webkit2gtk-4.1`).
+- **Ubuntu / Debian**: install the `.deb` with
+  `sudo apt install ./splashhound_1.0.0_amd64.deb`. Requires Ubuntu 24.04+ or
+  Debian 13+ (WebKitGTK 4.1).
+- **Other Linux**: unpack `splashhound-linux-x64.tar.gz` and run
+  `./splashhound`. It is built against Ubuntu 24.04, so it needs glibc 2.39+
+  and WebKitGTK 4.1, GTK 3 + libayatana-appindicator (Arch: `webkit2gtk-4.1`,
+  `gtk3`, `libsoup3`, `libayatana-appindicator`).
+- **Arch Linux**: build with `packaging/arch/PKGBUILD`
+  (`cd packaging/arch && makepkg -si`), or install the `splashhound` AUR
+  package once published.
 
-The Windows and Linux builds are produced by GitHub Actions for every `v*` tag.
+The Windows, Linux and `.deb` builds are produced by GitHub Actions for every
+`v*` tag; see `packaging/README.md` for local packaging and AUR instructions.
 
 ## Running
 

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Splashhound
+GenericName=Video Library
+Comment=Categorize and browse a video collection
+Exec=splashhound
+Icon=splashhound
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=video;library;tags;rating;
+StartupWMClass=splashhound
