@@ -780,6 +780,11 @@ async fn ffmpeg_convert(
 /* ---------------------------- video DNA -------------------------------- */
 
 pub const DNA_FRAMES: usize = 8;
+/// Three frames are enough to recognise a re-encode; some broken files simply
+/// have no data at half of the sample points.
+pub const DNA_MIN_FRAMES: usize = 3;
+/// Above this length an accurate re-sample (decoding from the start) is too slow.
+const DNA_ACCURATE_LIMIT_S: f64 = 900.0;
 
 pub async fn compute_dna(ffmpeg: &Path, file: &Path, duration_ms: Option<i64>) -> Result<Vec<u64>> {
     let duration = duration_ms.filter(|d| *d > 0).map(|d| d as f64 / 1000.0);
@@ -790,23 +795,64 @@ pub async fn compute_dna(ffmpeg: &Path, file: &Path, duration_ms: Option<i64>) -
         _ => (0..DNA_FRAMES).map(|i| 0.5 + i as f64).collect(),
     };
     let mut hashes = Vec::with_capacity(times.len());
-    for time in times {
-        if let Ok(hash) = frame_hash(ffmpeg, file, time).await {
+    for time in &times {
+        if let Ok(hash) = frame_hash(ffmpeg, file, *time, false).await {
             hashes.push(hash);
         }
     }
-    if hashes.len() < 4 {
+
+    // Broken or unusual files (old rips with damaged timestamps) often produce
+    // nothing with a fast seek. Decoding from the start works for those.
+    if hashes.len() < DNA_MIN_FRAMES && duration.map(|d| d <= DNA_ACCURATE_LIMIT_S).unwrap_or(true)
+    {
+        hashes.clear();
+        for time in &times {
+            if let Ok(hash) = frame_hash(ffmpeg, file, *time, true).await {
+                hashes.push(hash);
+            }
+            if hashes.len() == DNA_FRAMES {
+                break;
+            }
+        }
+    }
+
+    // Truncated downloads and files whose index lies about their length only
+    // decode near the beginning; sample the first minutes instead of giving up.
+    if hashes.len() < DNA_MIN_FRAMES {
+        if let Some(seconds) = duration.filter(|d| *d > 1.0) {
+            hashes.clear();
+            // Cap the window: on a long recording the readable part is usually
+            // the first minute or two, not 20 % of two hours.
+            let span = (seconds * 0.2).clamp(2.0, 120.0);
+            let fractions = [0.02, 0.06, 0.12, 0.2, 0.32, 0.46, 0.62, 0.8];
+            for fraction in fractions {
+                if let Ok(hash) = frame_hash(ffmpeg, file, span * fraction, false).await {
+                    hashes.push(hash);
+                }
+                if hashes.len() == DNA_FRAMES {
+                    break;
+                }
+            }
+        }
+    }
+
+    if hashes.len() < DNA_MIN_FRAMES {
         bail!("could not sample enough frames");
     }
     Ok(hashes)
 }
 
-async fn frame_hash(ffmpeg: &Path, file: &Path, time: f64) -> Result<u64> {
-    let output = quiet_command(ffmpeg)
-        .args(["-v", "error", "-nostdin", "-ss"])
-        .arg(format!("{:.3}", time))
-        .arg("-i")
-        .arg(file)
+async fn frame_hash(ffmpeg: &Path, file: &Path, time: f64, accurate: bool) -> Result<u64> {
+    let mut cmd = quiet_command(ffmpeg);
+    cmd.args(["-v", "error", "-nostdin"]);
+    if !accurate {
+        cmd.arg("-ss").arg(format!("{:.3}", time));
+    }
+    cmd.arg("-i").arg(file);
+    if accurate {
+        cmd.arg("-ss").arg(format!("{:.3}", time));
+    }
+    let output = cmd
         .args([
             "-frames:v",
             "1",

@@ -42,6 +42,11 @@ pub fn spawn(state: Arc<AppState>) {
             ..Default::default()
         };
     }
+    // An explicit run retries files that failed before (e.g. after installing a
+    // missing codec); they are marked again if they still cannot be sampled.
+    if let Ok(conn) = state.db.lock() {
+        let _ = db::reset_dna_failures(&conn);
+    }
     tauri::async_runtime::spawn(async move { run(state).await });
 }
 
@@ -163,7 +168,14 @@ fn record(state: &AppState, joined: Result<DnaResult, tokio::task::JoinError>) -
                 false
             }
         }
-        Err(_) => false,
+        Err(_) => {
+            // Remember files that cannot be sampled so later runs skip them
+            // instead of retrying (and reporting) them every time.
+            if let Ok(conn) = state.db.lock() {
+                let _ = db::mark_dna_failed(&conn, id, true);
+            }
+            false
+        }
     }
 }
 

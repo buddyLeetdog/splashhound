@@ -375,6 +375,12 @@ kbd {
 .dup-table tr:last-child td { border-bottom: none; }
 .dup-table tr.kept { background: rgba(53, 208, 165, 0.05); }
 .dup-table .fname { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dup-thumb-cell { padding: 6px 10px; }
+.dup-thumb {
+  width: 96px; height: 54px; object-fit: cover; display: block;
+  border-radius: 4px; background: #000;
+}
+.dup-thumb.broken { visibility: hidden; }
 .dup-table input[type="radio"] { accent-color: var(--accent); }
 .dup-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 14px; }
 

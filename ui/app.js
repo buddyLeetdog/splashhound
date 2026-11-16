@@ -138,7 +138,11 @@ function refreshChrome() {
   const s = state.stats || {};
   $('#count-library').textContent = s.total ?? 0;
   $('#count-rate').textContent = s.unreviewed ?? 0;
-  $('#count-dups').textContent = s.duplicates ?? 0;
+  // Hash duplicates / near-duplicate (DNA) groups.
+  $('#count-dups').textContent = `${s.duplicates ?? 0} / ${s.dnaGroups ?? 0}`;
+  $('#count-dups').title = `${s.duplicates ?? 0} identical (MD5) groups / ${s.dnaGroups ?? 0} similar (Video DNA) groups`;
+  const oldCount = $('#count-old');
+  if (oldCount) oldCount.textContent = s.oldCodecs ?? 0;
   $('#count-trash').textContent = s.trash ?? 0;
   const pct = s.total ? Math.round((100 * (s.reviewed || 0)) / s.total) : 0;
   $('#side-progress').style.width = `${pct}%`;
@@ -995,10 +999,16 @@ function renderLibraryGrid() {
   }
 
   grid.innerHTML = items.map(cardHtml).join('');
-  $$('.poster img', grid).forEach((img) => {
+  attachPosterSwap(grid);
+}
+
+/**
+ * Cards and duplicate rows show the tiny placeholder first and swap in the real
+ * poster once it is decoded (and hide broken ones).
+ */
+function attachPosterSwap(root) {
+  $$('img[data-poster]', root).forEach((img) => {
     img.addEventListener('error', () => img.classList.add('broken'));
-    // Placeholder first, then swap in the real poster as soon as it is decoded
-    // (which also covers the first-generation cost).
     const poster = img.dataset.poster;
     if (!poster) return;
     const pre = new Image();
@@ -2750,11 +2760,12 @@ async function renderSimilarTab() {
       <div class="scan-box">
         <div class="row between">
           <strong>${pending} video${pending === 1 ? '' : 's'} not analyzed</strong>
-          <span class="muted small">${analyzed} analyzed</span>
+          <span class="muted small">${analyzed} analyzed${stats.dnaFailed ? ` \u00b7 ${stats.dnaFailed} not analyzable` : ''}</span>
         </div>
         <p class="muted small" style="margin:6px 0 8px">
           Video DNA compares frames sampled across each video, so it finds re-encodes,
           resolution changes and different bitrates that MD5 cannot.
+          ${stats.dnaFailed ? 'Files marked "not analyzable" have no decodable video (broken or audio-only) and are skipped; running the analysis again retries them.' : ''}
         </p>
         <button class="btn primary" id="dna-start" ${pending ? '' : 'disabled'}>
           ${pending ? `Analyze ${pending} video${pending === 1 ? '' : 's'}` : 'Everything analyzed'}
@@ -2842,6 +2853,7 @@ function renderSimilar() {
   const sub = $('#dup-sub');
   if (sub) sub.textContent = `${groups.length} similar group${groups.length === 1 ? '' : 's'} \u00b7 ${state.stats.dnaDone || 0} videos analyzed`;
   list.innerHTML = `<div class="dup-list">${groups.map(similarGroupHtml).join('')}</div>`;
+  attachPosterSwap(list);
 
   $$('.dup-group', list).forEach((groupEl) => {
     const index = Number(groupEl.dataset.similarIndex);
@@ -2887,6 +2899,9 @@ function similarGroupHtml(group, index) {
   const rows = group.videos.map((v, rowIndex) => `
     <tr data-id="${v.id}">
       <td><input type="radio" name="keep-sim-${index}" value="${v.id}" ${state.keep[`sim-${index}`] === v.id ? 'checked' : ''}></td>
+      <td class="dup-thumb-cell">
+        <img class="dup-thumb" loading="lazy" src="${state.media}/lowres/${v.id}?k=${v.mtime}" data-poster="${state.media}/poster/${v.id}?k=${v.mtime}" alt="">
+      </td>
       <td>
         <button type="button" class="linkish fname" data-open-id="${v.id}" title="Open ${esc(v.fileName)}">${esc(v.fileName)}</button>
         ${rowIndex === 0 ? '<span class="badge best" title="Highest resolution / largest file">best</span>' : ''}
@@ -2909,6 +2924,7 @@ function similarGroupHtml(group, index) {
         <thead>
           <tr>
             <th style="width:34px">Keep</th>
+            <th style="width:108px"></th>
             <th>File</th>
             <th style="width:90px">Size</th>
             <th style="width:120px">Resolution</th>
@@ -3498,9 +3514,14 @@ function viewSettings() {
             <option value="15">15 seconds</option>
             <option value="30">30 seconds (default)</option>
             <option value="60">60 seconds</option>
+            <option value="120">120 seconds (high memory)</option>
           </select>
           <span class="muted small" id="stream-window-note"></span>
         </div>
+        <p class="warn small hidden" id="stream-window-warn" style="margin:6px 0 0">
+          120 seconds keeps two minutes ahead and two minutes behind — roughly 240 MB at 1080p
+          (about 1 GB for 4K).
+        </p>
         <p class="muted small" style="margin:6px 0 0">
           The window is kept ahead of the playhead, and the same amount behind it for quick jumps
           back — everything inside it can be seeked without restarting the decoder. It costs about
@@ -3724,12 +3745,18 @@ function viewSettings() {
   };
   const windowSelect = $('#set-stream-window');
   if (windowSelect) {
-    windowSelect.value = String(state.boot.streamWindow || 15);
+    const paintWindowWarning = () => {
+      const warn = $('#stream-window-warn');
+      if (warn) warn.classList.toggle('hidden', Number(windowSelect.value) < 120);
+    };
+    windowSelect.value = String(state.boot.streamWindow || 30);
+    paintWindowWarning();
     windowSelect.onchange = async () => {
       try {
         const saved = await invoke('set_stream_window', { seconds: Number(windowSelect.value) });
         state.boot.streamWindow = saved;
         windowSelect.value = String(saved);
+        paintWindowWarning();
         toast(`Buffer ahead: ${saved} s`);
       } catch (err) {
         toast(String(err), 'error');
