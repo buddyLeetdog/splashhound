@@ -1,4 +1,4 @@
-ï»¿'use strict';
+'use strict';
 
 /* ---------------------------------------------------------------------------
  * Splashhound frontend - plain JS against the Tauri command bridge.
@@ -300,7 +300,7 @@ async function init() {
     // Ask the webview which codecs beyond Chromium's built-in set it can decode.
     // HEVC needs the Windows "HEVC Video Extensions" package (or an OEM
     // equivalent) plus a GPU that supports it, so it has to be detected, not
-    // assumed â€” otherwise those files would be converted for nothing.
+    // assumed — otherwise those files would be converted for nothing.
     const probe = document.createElement('video');
     const canPlay = (codec) =>
       probe.canPlayType(`video/mp4; codecs="${codec}"`) !== '' ||
@@ -938,7 +938,7 @@ async function loadLibrary(reset) {
     grid.innerHTML = '';
   } else if (moreButton) {
     moreButton.disabled = true;
-    moreButton.textContent = 'Loadingâ€¦';
+    moreButton.textContent = 'Loading…';
   }
   state.lib.loading = true;
   grid.classList.add('loading');
@@ -1447,7 +1447,7 @@ function stopStreamPlayer() {
   }
 }
 
-function playStream(videoEl, overlay, video, mime, startSec = 0) {
+function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null) {
   stopStreamPlayer();
   const token = state.playerToken;
   const start = Math.max(0, startSec || 0);
@@ -1501,6 +1501,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0) {
         if (begin > 0.2) videoEl.currentTime = begin;
         videoEl.play().catch(() => {});
         overlay.classList.add('hidden');
+        if (freeze) freeze.remove();
       }
       pump();
     });
@@ -1537,7 +1538,10 @@ function playStream(videoEl, overlay, video, mime, startSec = 0) {
   let controls = null;
   let rangeEl = null;
   let nowEl = null;
+  let volBtn = null;
   let playing = false;
+  let pendingTarget = null;
+  let seekTimer = null;
 
   const fmt = (s) => {
     const total = Math.max(0, Math.floor(s || 0));
@@ -1548,13 +1552,66 @@ function playStream(videoEl, overlay, video, mime, startSec = 0) {
              : `${m}:${String(sec).padStart(2, '0')}`;
   };
 
+  const clamp = (t) => Math.max(0, Math.min(t, duration || t));
+
   const paint = () => {
     if (!rangeEl) return;
     // Each decoder run starts its own timeline at zero, so the file position is
     // the offset this run was started at plus the element's clock.
-    const pos = base + (videoEl.currentTime || 0);
+    const pos = pendingTarget !== null ? pendingTarget : base + (videoEl.currentTime || 0);
     rangeEl.value = String(duration ? Math.round((pos / duration) * 1000) : 0);
     if (nowEl) nowEl.textContent = fmt(pos);
+  };
+
+  const paintVolume = () => {
+    if (!volBtn) return;
+    const level = videoEl.muted ? 0 : videoEl.volume;
+    volBtn.textContent = level === 0 ? '\u{1F507}' : level < 0.5 ? '\u{1F509}' : '\u{1F50A}';
+    volBtn.title = `Mute (${Math.round(level * 100)}%)`;
+  };
+
+  const toggleFullscreen = () => {
+    if (!wrap) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      wrap.requestFullscreen().catch(() => {});
+    }
+  };
+
+  /** Freeze the current frame so a seek does not flash black while the new
+   *  decoder starts. */
+  const captureFrame = () => {
+    if (!wrap || !videoEl.videoWidth) return null;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.className = 'seek-freeze';
+      canvas.width = videoEl.videoWidth;
+      canvas.height = videoEl.videoHeight;
+      canvas.getContext('2d').drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      wrap.appendChild(canvas);
+      return canvas;
+    } catch (err) {
+      return null;
+    }
+  };
+
+  const startAt = (target) => {
+    const freezeFrame = captureFrame();
+    stopStreamPlayer();
+    playStream(videoEl, overlay, video, mime, clamp(target), freezeFrame);
+  };
+
+  const scheduleSeek = () => {
+    if (seekTimer) clearTimeout(seekTimer);
+    // Coalesce repeated arrow presses / scrubbing into one decoder start.
+    seekTimer = setTimeout(() => {
+      seekTimer = null;
+      const target = pendingTarget;
+      pendingTarget = null;
+      if (target !== null) startAt(target);
+    }, 90);
+    paint();
   };
 
   if (wrap) {
@@ -1562,18 +1619,27 @@ function playStream(videoEl, overlay, video, mime, startSec = 0) {
     controls = document.createElement('div');
     controls.className = 'stream-controls';
     controls.innerHTML = `
-      <button class="sc-play" title="Play / pause">\u23f8</button>
+      <button class="sc-play" title="Play / pause (Space)">\u23f8</button>
       <span class="sc-now">0:00</span>
-      <input class="sc-range" type="range" min="0" max="1000" value="0" step="1">
+      <input class="sc-range" type="range" min="0" max="1000" value="0" step="1" title="Seek">
       <span class="sc-total">${fmt(duration)}</span>
+      <button class="sc-vol" title="Mute (M)">\u{1F50A}</button>
+      <button class="sc-full" title="Fullscreen (F11 or double-click)">\u26f6</button>
       <span class="sc-badge" title="Decoded by the built-in player">stream</span>`;
     wrap.appendChild(controls);
     rangeEl = $('.sc-range', controls);
     nowEl = $('.sc-now', controls);
+    volBtn = $('.sc-vol', controls);
     const playBtn = $('.sc-play', controls);
     playBtn.onclick = () => {
       if (videoEl.paused) { videoEl.play().catch(() => {}); } else { videoEl.pause(); }
     };
+    volBtn.onclick = () => {
+      videoEl.muted = !videoEl.muted;
+      paintVolume();
+    };
+    $('.sc-full', controls).onclick = toggleFullscreen;
+    videoEl.addEventListener('dblclick', toggleFullscreen);
     const setButton = () => {
       playing = !videoEl.paused;
       playBtn.textContent = playing ? '\u23f8' : '\u25b6';
@@ -1587,16 +1653,16 @@ function playStream(videoEl, overlay, video, mime, startSec = 0) {
     });
     rangeEl.addEventListener('change', () => {
       if (!duration) return;
-      const target = (Number(rangeEl.value) / 1000) * duration;
-      stopStreamPlayer();
-      playStream(videoEl, overlay, video, mime, target);
+      pendingTarget = clamp((Number(rangeEl.value) / 1000) * duration);
+      scheduleSeek();
     });
     setButton();
+    paintVolume();
     paint();
   }
 
   const onSeeking = () => {
-    if (stopped || !videoEl.buffered.length) return;
+    if (stopped || pendingTarget !== null || !videoEl.buffered.length) return;
     const t = videoEl.currentTime;
     const ranges = videoEl.buffered;
     let inside = false;
@@ -1604,27 +1670,44 @@ function playStream(videoEl, overlay, video, mime, startSec = 0) {
       if (t >= ranges.start(i) + 0.5 && t <= ranges.end(i) - 0.2) { inside = true; break; }
     }
     if (!inside) {
-      stopStreamPlayer();
-      playStream(videoEl, overlay, video, mime, t);
+      startAt(t);
     }
   };
   videoEl.addEventListener('seeking', onSeeking);
 
   streamPlayer = {
+    /** Jump to an absolute position (seconds). */
     seek(seconds) {
-      const target = Math.max(0, Math.min(seconds, duration || seconds));
-      stopStreamPlayer();
-      playStream(videoEl, overlay, video, mime, target);
+      pendingTarget = clamp(seconds);
+      scheduleSeek();
+    },
+    /** Relative seek, counted from a pending jump if there is one. */
+    seekBy(delta) {
+      const from = pendingTarget !== null ? pendingTarget : base + (videoEl.currentTime || 0);
+      pendingTarget = clamp(from + delta);
+      scheduleSeek();
     },
     position() {
-      return base + (videoEl.currentTime || 0);
+      return pendingTarget !== null ? pendingTarget : base + (videoEl.currentTime || 0);
     },
     toggle() {
       if (videoEl.paused) videoEl.play().catch(() => {}); else videoEl.pause();
     },
+    volume(delta) {
+      videoEl.muted = false;
+      videoEl.volume = Math.max(0, Math.min(1, videoEl.volume + delta));
+      paintVolume();
+    },
+    mute() {
+      videoEl.muted = !videoEl.muted;
+      paintVolume();
+    },
+    fullscreen: toggleFullscreen,
     stop() {
       stopped = true;
+      if (seekTimer) clearTimeout(seekTimer);
       videoEl.removeEventListener('seeking', onSeeking);
+      videoEl.removeEventListener('dblclick', toggleFullscreen);
       if (controls) controls.remove();
       videoEl.controls = true;
       if (ws) { try { ws.close(); } catch {} }
@@ -2166,7 +2249,7 @@ function renderOld() {
     </div>
     <p class="muted small" style="margin:0 0 12px">
       Files whose codecs the built-in player cannot decode, plus files with
-      <span class="warn-inline">VFR</span> (variable frame rate) timestamps that make Chromium stutter â€”
+      <span class="warn-inline">VFR</span> (variable frame rate) timestamps that make Chromium stutter —
       VLC smooths those over, the webview does not.
       <br><strong>Build playback cache</strong> converts into the cache, so playback starts instantly but the
       original files stay as they are. <strong>Convert to MP4</strong> writes a real
@@ -3795,6 +3878,19 @@ document.addEventListener('keydown', (e) => {
     setDiscreet(!state.discreet);
     return;
   }
+  // Transport keys for the built-in player. Gated on it being active so the
+  // normal shortcuts still apply everywhere else.
+  if (streamPlayer) {
+    const tag = (e.target?.tagName || '').toLowerCase();
+    const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
+    if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (e.key === ' ') { e.preventDefault(); streamPlayer.toggle(); return; }
+      if (e.key === 'F11') { e.preventDefault(); streamPlayer.fullscreen(); return; }
+      if (e.key === 'm' || e.key === 'M') { e.preventDefault(); streamPlayer.mute(); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); streamPlayer.volume(0.05); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); streamPlayer.volume(-0.05); return; }
+    }
+  }
   const detailVideo = document.querySelector('#d-video');
   const rateVideo = state.view === 'rate' ? document.querySelector('#r-video') : null;
   const activeVideo = detailVideo || rateVideo;
@@ -3807,7 +3903,7 @@ document.addEventListener('keydown', (e) => {
     const step = e.ctrlKey ? 60 : 10;
     const direction = e.key === 'ArrowRight' ? 1 : -1;
     if (streamPlayer) {
-      streamPlayer.seek(streamPlayer.position() + direction * step);
+      streamPlayer.seekBy(direction * step);
       return;
     }
     const duration = Number.isFinite(activeVideo.duration) ? activeVideo.duration : 0;

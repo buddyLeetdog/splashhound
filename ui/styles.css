@@ -270,6 +270,20 @@ label { color: var(--muted); font-size: 12px; display: block; margin-bottom: 4px
   font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--accent); opacity: 0.85;
 }
+/* Freeze frame shown while a seek restarts the decoder. */
+.seek-freeze {
+  position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2;
+  object-fit: contain; background: #000; pointer-events: none;
+}
+/* Fullscreen uses the player box, not the <video>, so the controls stay. */
+.player-wrap:fullscreen {
+  width: 100vw; height: 100vh; border-radius: 0; border: none;
+  background: #000; display: flex; align-items: center; justify-content: center;
+}
+.player-wrap:fullscreen video {
+  width: 100%; height: 100%; max-height: none; object-fit: contain;
+}
+.player-wrap:fullscreen .stream-controls { padding-bottom: 12px; }
 
 .progress { height: 6px; background: #1a232c; border-radius: 4px; overflow: hidden; }
 .progress > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #55b8ff); transition: width 0.25s; border-radius: 4px; }

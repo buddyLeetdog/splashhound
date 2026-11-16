@@ -260,11 +260,21 @@ it starts immediately.
 Files WebView2 cannot decode — and files with a variable frame rate — are played
 by the built-in player instead of being converted: ffmpeg decodes the source and
 streams a constant-frame-rate fragmented MP4 into a `MediaSource` over a
-WebSocket. Nothing is cached, a file starts in about a second, audio stays in
-sync, and VFR files no longer stutter because the output timestamps are uniform.
-The trade-off is CPU: roughly half a core for 1080p, against a one-off
-conversion (and a cached copy) with the default path. Toggle it in
-**Settings → Playback**.
+WebSocket. Nothing is cached, audio stays in sync, and VFR files no longer
+stutter because the output timestamps are uniform.
+
+- **Encoder**: the best hardware encoder the machine can actually use
+  (`h264_nvenc`, `h264_qsv`, `h264_amf`, `h264_vaapi` — each is test-encoded once)
+  with `libx264` as fallback. Measured on an RTX 5060 Ti: 0.16 CPU cores vs 0.6
+  with software at 1080p.
+- **Seeking**: the last frame is held while the decoder restarts at the target,
+  the clock jumps immediately, and repeated scrubs are coalesced. A seek settles
+  in roughly 0.3–0.4 s.
+- **Controls**: play/pause, scrub bar, volume/mute, fullscreen (button, `F11` or
+  double-click), badges. Hotkeys: `Space`, `M`, `↑`/`↓`,
+  `Shift`/`Ctrl`+`←`/`→`, `F11`.
+
+Toggle it in **Settings → Playback**.
 
 ## Development
 

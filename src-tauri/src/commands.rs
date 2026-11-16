@@ -482,6 +482,13 @@ pub async fn set_native_player(
     db::set_setting(&conn, "native_player", if enabled { "1" } else { "0" }).map_err(err)
 }
 
+/// Which encoder the built-in player will use (`None` means libx264).
+#[tauri::command]
+pub async fn stream_encoder(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
+    let ffmpeg = state.inner().ffmpeg().ok_or("ffmpeg was not found")?;
+    Ok(stream::hardware_encoder(&ffmpeg.ffmpeg).map(str::to_string))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackInfo {
