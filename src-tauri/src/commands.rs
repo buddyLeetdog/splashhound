@@ -291,11 +291,18 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             progress: 0.0,
             error: job.error,
         },
-        Some(job) if job.state == "done" => PlaybackInfo {
+        Some(job) if job.state == "done" && cache.is_file() => PlaybackInfo {
             mode,
             state: "ready".into(),
             url: Some(url),
             progress: 1.0,
+            error: None,
+        },
+        Some(job) if job.state == "done" => PlaybackInfo {
+            mode,
+            state: "queued".into(),
+            url: None,
+            progress: -1.0,
             error: None,
         },
         Some(job) => PlaybackInfo {
