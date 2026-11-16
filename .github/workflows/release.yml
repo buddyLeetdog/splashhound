@@ -62,6 +62,9 @@ jobs:
           cp README.md LICENSE dist/
           tar -czf "splashhound-linux-x64.tar.gz" -C dist .
           bash packaging/linux/build_deb.sh "${GITHUB_REF_NAME#v}"
+          # Copy the package next to the other artifacts so all uploads share
+          # one root directory.
+          cp dist/splashhound_*_amd64.deb .
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -71,7 +74,7 @@ jobs:
           path: |
             splashhound-windows-x64.zip
             splashhound-linux-x64.tar.gz
-            dist/splashhound_*_amd64.deb
+            splashhound_*_amd64.deb
 
   publish:
     name: publish release
@@ -86,6 +89,9 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+            artifacts/**/*.deb
           generate_release_notes: true
           fail_on_unmatched_files: true
