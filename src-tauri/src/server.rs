@@ -15,13 +15,17 @@ use crate::{media, AppState};
 
 /// Local HTTP server used only for media streaming (range requests) and
 /// generated thumbnails. Data flows through Tauri IPC instead.
-pub fn spawn(state: Arc<AppState>, listener: std::net::TcpListener) {
-    let app = Router::new()
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/media/{id}", get(media_handler))
         .route("/thumb/{id}/{index}", get(thumb_handler))
         .route("/poster/{id}", get(poster_handler))
-        .with_state(state);
+        .with_state(state)
+}
+
+pub fn spawn(state: Arc<AppState>, listener: std::net::TcpListener) {
+    let app = router(state);
 
     tauri::async_runtime::spawn(async move {
         match tokio::net::TcpListener::from_std(listener) {

@@ -12,3 +12,5 @@ desktop.ini
 .idea/
 .vscode/
 *.log
+/tools/*.png
+__pycache__/

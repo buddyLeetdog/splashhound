@@ -210,7 +210,7 @@ pub fn run() {
 
 /// Headless indexing pass, used for development verification:
 /// `inflatool.exe --scan <folder>`
-pub fn headless_scan(dir: PathBuf) {
+pub fn headless_scan(dir: PathBuf, serve: bool) {
     let base = std::env::temp_dir().join("inflatool-headless");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
@@ -294,6 +294,22 @@ pub fn headless_scan(dir: PathBuf) {
     println!("duplicate groups: {}", dups.len());
     for g in &dups {
         println!("  {} ({} files)", g.md5, g.videos.len());
+    }
+    drop(conn);
+
+    if serve {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        *state.media_base.write().unwrap() = format!("http://127.0.0.1:{}", port);
+        println!("MEDIA_BASE=http://127.0.0.1:{}", port);
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let app = server::router(state.clone());
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            let _ = axum::serve(listener, app).await;
+        });
     }
 }
 

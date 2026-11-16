@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>InflaTool</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <div>
+          <div class="brand-name">InflaTool</div>
+          <div class="brand-sub">video library</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item" data-view="library">
+          <span class="ni-icon">▦</span><span class="ni-label">Library</span>
+          <span class="ni-count" id="count-library">0</span>
+        </button>
+        <button class="nav-item" data-view="rate">
+          <span class="ni-icon">★</span><span class="ni-label">Rate</span>
+          <span class="ni-count" id="count-rate">0</span>
+        </button>
+        <button class="nav-item" data-view="duplicates">
+          <span class="ni-icon">⧉</span><span class="ni-label">Duplicates</span>
+          <span class="ni-count" id="count-dups">0</span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <span class="ni-icon">⚙</span><span class="ni-label">Settings</span>
+        </button>
+      </nav>
+
+      <div class="side-foot">
+        <div class="progress"><div id="side-progress"></div></div>
+        <div class="small muted" id="side-progress-text">0 / 0 reviewed</div>
+        <div class="small scan-line" id="side-scan"></div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <div id="view"></div>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toasts"></div>
+
+  <datalist id="tag-list"></datalist>
+  <datalist id="creator-list"></datalist>
+
+  <script src="app.js"></script>
+</body>
+</html>
