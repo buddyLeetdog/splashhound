@@ -1535,6 +1535,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
         if (freeze) freeze.remove();
       }
       pump();
+      trimBehind();
     });
 
     // Adopt the socket that was opened while the dialog was rendering, or open
@@ -1597,6 +1598,9 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
         const bytesPerSecond = mediaEnd > 0.5 ? receivedBytes / mediaEnd : 0;
         const queuedMs = bytesPerSecond > 0 ? (queued / bytesPerSecond) * 1000 : 0;
         ws.send(JSON.stringify({ ahead: Math.round(bufferedAhead() + queuedMs) }));
+        // Keep the history bounded even when the decoder is paused on a full
+        // buffer and no appends (updateend) are happening.
+        trimBehind();
       } catch (err) {
         /* ignore */
       }
@@ -1629,6 +1633,24 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
     // past the last frame and the picture would stay frozen on the held frame.
     const max = duration > 2 ? duration - 1 : duration || t;
     return Math.max(0, Math.min(t, max));
+  };
+
+  // MediaSource keeps everything that has been played until Chromium's quota
+  // forces it out (~150 MB here), so trim the history ourselves: the window is
+  // kept ahead, and the same amount behind for quick seeks back.
+  const windowSec = Math.max(3, Math.min(120, state.boot?.streamWindow || 15));
+  const trimBehind = () => {
+    if (!source || source.updating || !videoEl.buffered.length) return;
+    const keepBack = Math.max(8, Math.min(windowSec, 60));
+    const start = videoEl.buffered.start(0);
+    const cut = videoEl.currentTime - keepBack;
+    if (cut > start + 1) {
+      try {
+        source.remove(start, cut);
+      } catch (err) {
+        /* ignore: the next updateend retries */
+      }
+    }
   };
 
   /** Seconds of video already decoded ahead of the playhead. */
@@ -3480,9 +3502,9 @@ function viewSettings() {
           <span class="muted small" id="stream-window-note"></span>
         </div>
         <p class="muted small" style="margin:6px 0 0">
-          Everything inside this window can be seeked without restarting the decoder, so a bigger
-          buffer makes longer jumps instant. It costs memory: about 1 MB per second of video for
-          1080p, i.e. roughly 30 MB at 30 seconds.
+          The window is kept ahead of the playhead, and the same amount behind it for quick jumps
+          back — everything inside it can be seeked without restarting the decoder. It costs about
+          1 MB per second of video at 1080p, so 15 seconds ≈ 30 MB and 60 seconds ≈ 120 MB.
         </p>
       </section>
 
