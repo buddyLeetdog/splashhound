@@ -468,3 +468,9 @@ kbd {
 .linkish { background: none; border: none; padding: 0; color: var(--text); font-family: inherit; font-size: inherit; text-align: left; cursor: pointer; }
 .linkish:hover { color: var(--accent); text-decoration: underline; }
 
+
+.badge.best { background: rgba(53, 208, 165, 0.16); color: #bff3e4; border-color: rgba(53, 208, 165, 0.35); margin-left: 6px; }
+
+
+.file-path { word-break: break-all; line-height: 1.35; margin: 2px 0 10px; user-select: text; }
+

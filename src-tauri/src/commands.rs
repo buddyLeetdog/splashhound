@@ -457,7 +457,9 @@ pub async fn reveal(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), Stri
     {
         use std::os::windows::process::CommandExt;
         let mut command = std::process::Command::new("explorer");
-        command.arg(format!("/select,{}", video.path));
+        // explorer needs /select,"<path>" with the path quoted as part of the
+        // same argument; otherwise paths with spaces fall back to Documents.
+        command.raw_arg(format!("/select,\"{}\"", video.path));
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         command.spawn().map_err(err)?;
     }

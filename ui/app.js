@@ -1519,6 +1519,7 @@ function renderRateCurrent() {
       <aside class="rate-panel">
         <div class="small muted">${r.index + 1} of ${r.queue.length} in this batch</div>
         <h2 class="rate-title">${esc(v.fileName)}</h2>
+        <div class="file-path muted small" title="${esc(v.path)}">${esc(v.path)}</div>
         <dl class="meta-table">
           <dt>Duration</dt><dd>${v.durationMs ? fmtDur(v.durationMs) : '-'}</dd>
           <dt>Size</dt><dd>${fmtSize(v.size)}</dd>
@@ -1898,11 +1899,12 @@ function renderSimilar() {
 }
 
 function similarGroupHtml(group, index) {
-  const rows = group.videos.map((v) => `
+  const rows = group.videos.map((v, rowIndex) => `
     <tr data-id="${v.id}">
       <td><input type="radio" name="keep-sim-${index}" value="${v.id}" ${state.keep[`sim-${index}`] === v.id ? 'checked' : ''}></td>
       <td>
         <button type="button" class="linkish fname" data-open-id="${v.id}" title="Open ${esc(v.fileName)}">${esc(v.fileName)}</button>
+        ${rowIndex === 0 ? '<span class="badge best" title="Highest resolution / largest file">best</span>' : ''}
         <div class="muted small fname" title="${esc(v.path)}">${esc(v.path)}</div>
       </td>
       <td>${fmtSize(v.size)}</td>
@@ -1942,6 +1944,13 @@ function similarGroupHtml(group, index) {
 
 function autoPick(videos) {
   const sorted = videos.slice().sort((a, b) => {
+    // Prefer the best quality copy: resolution, then bitrate (file size),
+    // then duration. Identical copies fall through to views/age.
+    const areaA = (a.width || 0) * (a.height || 0);
+    const areaB = (b.width || 0) * (b.height || 0);
+    if (areaB !== areaA) return areaB - areaA;
+    if (b.size !== a.size) return b.size - a.size;
+    if ((b.durationMs || 0) !== (a.durationMs || 0)) return (b.durationMs || 0) - (a.durationMs || 0);
     if (b.viewCount !== a.viewCount) return b.viewCount - a.viewCount;
     return a.addedAt - b.addedAt;
   });

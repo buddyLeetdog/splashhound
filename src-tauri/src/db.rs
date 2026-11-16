@@ -1575,7 +1575,16 @@ pub fn similar_groups(conn: &Connection) -> Result<Vec<SimilarGroup>> {
             }
         }
         if videos.len() >= 2 {
-            videos.sort_by_key(|v| v.added_at);
+            // Best copy first: highest resolution, then largest file (bitrate),
+            // then longest duration. This is also the default keeper in the UI.
+            videos.sort_by(|a, b| {
+                let area = |v: &VideoDto| v.width.unwrap_or(0) * v.height.unwrap_or(0);
+                area(b)
+                    .cmp(&area(a))
+                    .then_with(|| b.size.cmp(&a.size))
+                    .then_with(|| b.duration_ms.unwrap_or(0).cmp(&a.duration_ms.unwrap_or(0)))
+                    .then_with(|| a.added_at.cmp(&b.added_at))
+            });
             out.push(SimilarGroup { score, videos });
         }
     }
