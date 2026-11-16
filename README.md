@@ -89,7 +89,12 @@ paths, cache size and cleanup, library statistics.
 
 ## Index
 
-SQLite database in `%APPDATA%\com.splashhound.desktop\library.db`.
+By default the SQLite database lives in
+`%APPDATA%\com.splashhound.desktop\library.db`. **Settings → Storage → Change
+folder…** moves it elsewhere: the database is copied to the new folder, the
+current file is kept as a backup, and an existing `library.db` at the target is
+renamed aside first. The chosen location is remembered in `config.json` next to
+the default folder, so the app finds it on startup.
 
 `videos` columns: file name, path, size, modification time, duration, width,
 height, video/audio codec, has-audio, MD5, creator, NSFW, popping, destruction,

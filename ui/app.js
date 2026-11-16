@@ -95,15 +95,6 @@ function phaseLabel(phase) {
   }[phase] || phase || '');
 }
 
-function refreshDatalists() {
-  $('#tag-list').innerHTML = state.tags
-    .map((t) => `<option value="${esc(t.name)}"></option>`)
-    .join('');
-  $('#creator-list').innerHTML = state.creators
-    .map((c) => `<option value="${esc(c)}"></option>`)
-    .join('');
-}
-
 function refreshChrome() {
   const s = state.stats || {};
   $('#count-library').textContent = s.total ?? 0;
@@ -124,7 +115,6 @@ async function refreshMeta() {
     state.tags = tags;
     state.creators = creators;
     refreshChrome();
-    refreshDatalists();
   } catch (err) {
     console.warn('refreshMeta failed', err);
   }
@@ -135,6 +125,7 @@ async function refreshMeta() {
 let modalCloser = null;
 
 function modal(html, options = {}) {
+  closeAutocomplete();
   const root = $('#modal-root');
   root.innerHTML = `<div class="modal-backdrop"><div class="modal ${options.className || ''}">${html}</div></div>`;
   const close = () => {
@@ -193,7 +184,6 @@ async function init() {
     state.creators = boot.creators;
     state.scan = boot.scan;
     refreshChrome();
-    refreshDatalists();
     if (state.scan?.running) startScanPolling();
     navigate('library');
   } catch (err) {
@@ -202,6 +192,7 @@ async function init() {
 }
 
 function navigate(view) {
+  closeAutocomplete();
   if (state.view === view) {
     if (view === 'library') loadLibrary(true);
     return;
@@ -482,6 +473,119 @@ function cardHtml(v) {
     </article>`;
 }
 
+/* -------------------------- autocomplete popup ---------------------------- */
+
+let autocompleteCloser = null;
+
+function closeAutocomplete() {
+  const closer = autocompleteCloser;
+  autocompleteCloser = null;
+  if (closer) closer();
+}
+
+/**
+ * Themed suggestion list for inputs (replaces the OS-styled <datalist>).
+ * getItems(query) returns [{ value, meta, create }].
+ */
+function attachAutocomplete(input, getItems, options = {}) {
+  let popup = null;
+  let items = [];
+  let active = -1;
+
+  const close = () => {
+    if (popup) {
+      popup.remove();
+      popup = null;
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    }
+    items = [];
+    active = -1;
+    if (autocompleteCloser === close) autocompleteCloser = null;
+  };
+
+  function reposition() {
+    if (!popup) return;
+    const rect = input.getBoundingClientRect();
+    popup.style.left = `${rect.left}px`;
+    popup.style.top = `${rect.bottom + 4}px`;
+    popup.style.width = `${rect.width}px`;
+  }
+
+  const render = () => {
+    if (!popup) return;
+    popup.innerHTML = items.map((item, i) => `
+      <button type="button" class="ac-item ${i === active ? 'active' : ''}" data-i="${i}">
+        <span class="ac-label">${item.create ? '+ ' : ''}${esc(item.value)}</span>
+        ${item.meta !== undefined && item.meta !== null ? `<span class="ac-meta">${esc(item.meta)}</span>` : ''}
+      </button>`).join('');
+    $$('.ac-item', popup).forEach((el) => {
+      el.addEventListener('mousedown', (e) => e.preventDefault());
+      el.addEventListener('click', () => pick(Number(el.dataset.i)));
+    });
+    const current = $('.ac-item.active', popup);
+    if (current) current.scrollIntoView({ block: 'nearest' });
+  };
+
+  const open = () => {
+    items = (getItems(input.value.trim()) || []).slice(0, 9);
+    if (!items.length) {
+      close();
+      return;
+    }
+    if (autocompleteCloser && autocompleteCloser !== close) closeAutocomplete();
+    active = 0;
+    if (!popup) {
+      popup = document.createElement('div');
+      popup.className = 'ac-popup';
+      popup.addEventListener('mousedown', (e) => e.preventDefault());
+      document.body.appendChild(popup);
+      window.addEventListener('scroll', reposition, true);
+      window.addEventListener('resize', reposition);
+      autocompleteCloser = close;
+    }
+    reposition();
+    render();
+  };
+
+  const pick = (index) => {
+    const item = items[index];
+    if (!item) return;
+    close();
+    if (options.onPick) options.onPick(item.value, item);
+    input.focus();
+  };
+
+  input.addEventListener('input', open);
+  input.addEventListener('focus', open);
+  input.addEventListener('blur', () => setTimeout(close, 140));
+  input.addEventListener('keydown', (e) => {
+    if (!popup) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      active = (active + 1) % items.length;
+      render();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      active = (active - 1 + items.length) % items.length;
+      render();
+    } else if (e.key === 'Enter') {
+      if (active >= 0) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        pick(active);
+      }
+    } else if (e.key === 'Escape') {
+      e.stopPropagation();
+      close();
+    } else if (e.key === 'Tab') {
+      close();
+    }
+  });
+
+  return { close };
+}
+
 /* ---------------------------- editor widget ------------------------------ */
 
 function editorHtml(v, prefix, reviewedInitial) {
@@ -489,7 +593,7 @@ function editorHtml(v, prefix, reviewedInitial) {
   return `
     <div class="field">
       <label>Creator</label>
-      <input class="input" id="${prefix}-creator" list="creator-list" placeholder="Unknown" value="${esc(v.creator || '')}">
+      <input class="input" id="${prefix}-creator" placeholder="Unknown" value="${esc(v.creator || '')}">
     </div>
     <div class="field">
       <label>Flags</label>
@@ -510,7 +614,7 @@ function editorHtml(v, prefix, reviewedInitial) {
     <div class="field">
       <label>Tags</label>
       <div class="chips chips-static" id="${prefix}-tagchips"></div>
-      <input class="input" id="${prefix}-taginput" list="tag-list" placeholder="Type a tag and press Enter" style="margin-top:6px">
+      <input class="input" id="${prefix}-taginput" placeholder="Type a tag and press Enter" style="margin-top:6px">
     </div>
     <div class="field">
       <label>Notes</label>
@@ -570,21 +674,59 @@ function createEditor(root, prefix, video) {
   if (clearBtn) clearBtn.onclick = () => { form.rating = 0; renderStars(); };
 
   const tagInput = $(`#${prefix}-taginput`, root);
+
+  const addTag = (raw) => {
+    const name = String(raw || '').trim().replace(/,+$/, '');
+    if (!name) return;
+    if (!form.tags.some((t) => t.toLowerCase() === name.toLowerCase())) {
+      form.tags.push(name);
+      renderTags();
+    }
+    tagInput.value = '';
+  };
+
+  attachAutocomplete(tagInput, (query) => {
+    const q = query.toLowerCase();
+    const taken = new Set(form.tags.map((t) => t.toLowerCase()));
+    const matches = state.tags
+      .filter((t) => !taken.has(t.name.toLowerCase()) && (!q || t.name.toLowerCase().includes(q)))
+      .sort((a, b) => {
+        const as = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const bs = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        if (as !== bs) return as - bs;
+        if (b.count !== a.count) return b.count - a.count;
+        return a.name.localeCompare(b.name);
+      })
+      .map((t) => ({ value: t.name, meta: t.count }));
+    if (q && !state.tags.some((t) => t.name.toLowerCase() === q) && !taken.has(q)) {
+      matches.unshift({ value: query, meta: 'new', create: true });
+    }
+    return matches;
+  }, { onPick: addTag });
+
   tagInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ',') {
       e.preventDefault();
       e.stopPropagation();
-      const name = tagInput.value.trim().replace(/,+$/, '');
-      if (name && !form.tags.some((t) => t.toLowerCase() === name.toLowerCase())) {
-        form.tags.push(name);
-        renderTags();
-      }
-      tagInput.value = '';
+      addTag(tagInput.value);
     } else if (e.key === 'Backspace' && !tagInput.value && form.tags.length) {
       form.tags.pop();
       renderTags();
     }
   });
+
+  const creatorInput = $(`#${prefix}-creator`, root);
+  attachAutocomplete(creatorInput, (query) => {
+    const q = query.toLowerCase();
+    return state.creators
+      .filter((c) => !q || c.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const as = a.toLowerCase().startsWith(q) ? 0 : 1;
+        const bs = b.toLowerCase().startsWith(q) ? 0 : 1;
+        return as - bs || a.localeCompare(b);
+      })
+      .map((c) => ({ value: c }));
+  }, { onPick: (value) => { creatorInput.value = value; } });
 
   root.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-tag-i]');
@@ -823,6 +965,7 @@ async function loadRateQueue() {
 }
 
 function renderRateCurrent() {
+  closeAutocomplete();
   const r = state.rate;
   const body = $('#rate-body');
   if (!body) return;
@@ -1170,8 +1313,16 @@ function viewSettings() {
 
       <section class="panel">
         <h2>Storage</h2>
-        <div class="kv">Database: <code>${esc(b.dbPath || '')}</code></div>
-        <div class="kv">Cache: <code>${esc(b.cacheDir || '')}</code> — <span id="cache-size">…</span></div>
+        <div class="kv">Database folder: <code>${esc(b.dataDir || '')}</code></div>
+        <div class="kv">Library file: <code>${esc(b.dbPath || '')}</code></div>
+        <div class="row gap" style="margin:8px 0 10px">
+          <button class="btn" id="set-db-dir">Change folder…</button>
+          ${b.dataDir && b.defaultDataDir && b.dataDir !== b.defaultDataDir
+            ? '<button class="btn" id="set-db-default">Use default</button>' : ''}
+        </div>
+        ${b.dataWarning ? `<p class="warn small">${esc(b.dataWarning)}</p>` : ''}
+        <p class="muted small">Moving copies <code>library.db</code> to the chosen folder; the current file stays behind as a backup. An existing <code>library.db</code> in the target folder is renamed aside first.</p>
+        <div class="kv" style="margin-top:12px">Cache: <code>${esc(b.cacheDir || '')}</code> — <span id="cache-size">…</span></div>
         <div class="kv">Trash: <code>${esc(b.trashDir || '—')}</code></div>
         <div class="row gap" style="margin-top:10px">
           <button class="btn" id="set-clear-cache">Clear cache</button>
@@ -1260,6 +1411,51 @@ function viewSettings() {
   loadCacheSize();
 
   $('#set-refresh-cache').onclick = loadCacheSize;
+  const moveDatabase = async (target) => {
+    try {
+      const res = await invoke('set_data_dir', { path: target });
+      state.boot.dataDir = res.dataDir;
+      state.boot.dbPath = res.dbPath;
+      state.boot.dataWarning = null;
+      toast(res.backup
+        ? `Database moved. The previous file in the target folder was kept as ${res.backup}`
+        : 'Database moved.');
+      await refreshMeta();
+      viewSettings();
+    } catch (err) {
+      toast(`Could not move the database: ${err}`, 'error');
+    }
+  };
+
+  $('#set-db-dir').onclick = async () => {
+    let path;
+    try {
+      path = await invoke('pick_folder');
+    } catch (err) {
+      toast(String(err), 'error');
+      return;
+    }
+    if (!path) return;
+    const ok = await confirmDialog({
+      title: 'Move the library database?',
+      message: `Copy library.db to:\n${path}\n\nThe current file stays where it is as a backup.`,
+      okLabel: 'Move database',
+    });
+    if (ok) await moveDatabase(path);
+  };
+
+  const defaultDbBtn = $('#set-db-default');
+  if (defaultDbBtn) {
+    defaultDbBtn.onclick = async () => {
+      const ok = await confirmDialog({
+        title: 'Move the database back?',
+        message: `Copy library.db to the default folder:\n${state.boot.defaultDataDir}\n\nThe current file stays where it is as a backup.`,
+        okLabel: 'Use default folder',
+      });
+      if (ok) await moveDatabase(null);
+    };
+  }
+
   $('#set-clear-cache').onclick = async () => {
     const ok = await confirmDialog({
       title: 'Clear generated cache?',

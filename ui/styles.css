@@ -364,3 +364,24 @@ kbd {
 @keyframes slide-in { from { opacity: 0; transform: translateY(8px); } }
 
 .fatal { padding: 40px; font-family: Consolas, monospace; color: #ffb3b3; white-space: pre-wrap; }
+
+/* ---------- autocomplete popup ---------- */
+.ac-popup {
+  position: fixed; z-index: 300;
+  background: #141b23; border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: var(--shadow);
+  padding: 4px; max-height: 260px; overflow-y: auto;
+  animation: ac-in 0.08s ease;
+}
+.ac-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; text-align: left; border: none; background: transparent;
+  color: var(--text); font-family: inherit; font-size: 13px;
+  padding: 7px 9px; border-radius: 7px; cursor: pointer;
+}
+.ac-item:hover { background: var(--panel-3); }
+.ac-item.active { background: rgba(53, 208, 165, 0.14); color: #bff3e4; }
+.ac-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-meta { color: var(--muted); font-size: 11px; flex: none; }
+.ac-item.active .ac-meta { color: #8ad9c5; }
+@keyframes ac-in { from { opacity: 0; transform: translateY(-3px); } }

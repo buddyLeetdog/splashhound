@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod config;
 pub mod db;
 pub mod media;
 pub mod scan;
@@ -6,7 +7,7 @@ pub mod server;
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
@@ -69,9 +70,14 @@ pub struct Conversion {
 
 pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
-    pub db_path: PathBuf,
-    pub data_dir: PathBuf,
+    pub db_path: RwLock<PathBuf>,
+    /// Folder that holds library.db (may be a user-chosen location).
+    pub data_dir: RwLock<PathBuf>,
+    /// Where the config file lives, and the fallback database folder.
+    pub default_data_dir: PathBuf,
+    pub config_path: PathBuf,
     pub cache_dir: PathBuf,
+    pub data_warning: RwLock<Option<String>>,
     pub root: RwLock<Option<PathBuf>>,
     pub ffmpeg: RwLock<Option<Ffmpeg>>,
     pub media_base: RwLock<String>,
@@ -87,15 +93,21 @@ impl AppState {
         conn: rusqlite::Connection,
         db_path: PathBuf,
         data_dir: PathBuf,
+        default_data_dir: PathBuf,
+        config_path: PathBuf,
         cache_dir: PathBuf,
+        data_warning: Option<String>,
         root: Option<PathBuf>,
     ) -> Self {
         std::fs::create_dir_all(&cache_dir).ok();
         let state = Self {
             db: Arc::new(Mutex::new(conn)),
-            db_path,
-            data_dir,
+            db_path: RwLock::new(db_path),
+            data_dir: RwLock::new(data_dir),
+            default_data_dir,
+            config_path,
             cache_dir,
+            data_warning: RwLock::new(data_warning),
             root: RwLock::new(root),
             ffmpeg: RwLock::new(None),
             media_base: RwLock::new(String::new()),
@@ -107,6 +119,18 @@ impl AppState {
         };
         state.refresh_ffmpeg();
         state
+    }
+
+    pub fn db_path(&self) -> PathBuf {
+        self.db_path.read().unwrap().clone()
+    }
+
+    pub fn data_dir(&self) -> PathBuf {
+        self.data_dir.read().unwrap().clone()
+    }
+
+    pub fn data_warning(&self) -> Option<String> {
+        self.data_warning.read().unwrap().clone()
     }
 
     pub fn ffmpeg(&self) -> Option<Ffmpeg> {
@@ -158,17 +182,60 @@ impl AppState {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
+            let default_data_dir = app.path().app_data_dir()?;
             let cache_dir = app.path().app_cache_dir()?;
-            migrate_legacy_dirs(&data_dir, &cache_dir);
-            std::fs::create_dir_all(&data_dir)?;
+            migrate_legacy_dirs(&default_data_dir, &cache_dir);
+            std::fs::create_dir_all(&default_data_dir)?;
             std::fs::create_dir_all(&cache_dir)?;
-            let db_path = data_dir.join("library.db");
-            let conn = db::open(&db_path)?;
+
+            let config_path = default_data_dir.join("config.json");
+            let configured = config::read(&config_path)
+                .data_dir
+                .map(|p| Path::new(&p).components().collect::<PathBuf>());
+            let mut warning = None;
+
+            let (conn, data_dir, db_path) = match configured {
+                Some(dir) if !dir.is_dir() => {
+                    warning = Some(format!(
+                        "Database folder is not available: {}. Using the default location for now.",
+                        dir.display()
+                    ));
+                    let path = default_data_dir.join("library.db");
+                    (db::open(&path)?, default_data_dir.clone(), path)
+                }
+                Some(dir) => {
+                    let path = dir.join("library.db");
+                    match db::open(&path) {
+                        Ok(conn) => (conn, dir, path),
+                        Err(err) => {
+                            warning = Some(format!(
+                                "Could not open the database at {} ({err}). Using the default location.",
+                                path.display()
+                            ));
+                            let fallback = default_data_dir.join("library.db");
+                            (db::open(&fallback)?, default_data_dir.clone(), fallback)
+                        }
+                    }
+                }
+                None => {
+                    let path = default_data_dir.join("library.db");
+                    (db::open(&path)?, default_data_dir.clone(), path)
+                }
+            };
+
             let root = db::get_setting(&conn, "root")
                 .map(PathBuf::from)
                 .filter(|p| p.is_dir());
-            let state = Arc::new(AppState::new(conn, db_path, data_dir, cache_dir, root));
+            let state = Arc::new(AppState::new(
+                conn,
+                db_path,
+                data_dir,
+                default_data_dir,
+                config_path,
+                cache_dir,
+                warning,
+                root,
+            ));
 
             // Bind the local media server synchronously so the port is known before
             // the UI asks for it, then hand it to the async runtime.
@@ -204,6 +271,7 @@ pub fn run() {
             commands::cache_size,
             commands::clear_cache,
             commands::set_ffmpeg_dir,
+            commands::set_data_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -272,7 +340,10 @@ pub fn headless_scan(dir: PathBuf, serve: bool) {
         conn,
         db_path,
         base.clone(),
+        base.clone(),
+        base.join("config.json"),
         base.join("cache"),
+        None,
         Some(dir.clone()),
     ));
     println!("ffmpeg: {:?}", state.ffmpeg());

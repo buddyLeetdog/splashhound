@@ -3,7 +3,7 @@ use std::{path::Path, path::PathBuf, sync::Arc};
 use serde::Serialize;
 use tauri::State;
 
-use crate::{db, media, scan, AppState, ScanStatus};
+use crate::{config, db, media, scan, AppState, ScanStatus};
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -15,6 +15,9 @@ pub struct Bootstrap {
     pub root: Option<String>,
     pub media_base: String,
     pub db_path: String,
+    pub data_dir: String,
+    pub default_data_dir: String,
+    pub data_warning: Option<String>,
     pub cache_dir: String,
     pub trash_dir: Option<String>,
     pub ffmpeg_ok: bool,
@@ -48,7 +51,10 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
         trash_dir,
         root: root_string,
         media_base: st.media_base(),
-        db_path: st.db_path.to_string_lossy().to_string(),
+        db_path: st.db_path().to_string_lossy().to_string(),
+        data_dir: st.data_dir().to_string_lossy().to_string(),
+        default_data_dir: st.default_data_dir.to_string_lossy().to_string(),
+        data_warning: st.data_warning(),
         cache_dir: st.cache_dir.to_string_lossy().to_string(),
         ffmpeg_ok: ff.is_some(),
         ffmpeg_dir: ff.map(|f| {
@@ -441,4 +447,120 @@ pub async fn set_ffmpeg_dir(
     }
     st.refresh_ffmpeg();
     Ok(st.ffmpeg().is_some())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDirInfo {
+    pub data_dir: String,
+    pub db_path: String,
+    pub backup: Option<String>,
+}
+
+/// Move the library database to another folder. The current file is left in
+/// place as a backup; an existing `library.db` at the target is renamed aside.
+#[tauri::command]
+pub async fn set_data_dir(
+    state: State<'_, Arc<AppState>>,
+    path: Option<String>,
+) -> Result<DataDirInfo, String> {
+    let st = state.inner().clone();
+    if st.scan.lock().map_err(err)?.running {
+        return Err("Wait for the current scan to finish before moving the database.".into());
+    }
+
+    let target = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => Path::new(p).components().collect::<PathBuf>(),
+        None => st.default_data_dir.clone(),
+    };
+    let current = st.data_dir();
+    if target == current {
+        return Ok(DataDirInfo {
+            data_dir: current.to_string_lossy().to_string(),
+            db_path: st.db_path().to_string_lossy().to_string(),
+            backup: None,
+        });
+    }
+
+    tokio::fs::create_dir_all(&target)
+        .await
+        .map_err(|e| format!("Could not create {}: {e}", target.display()))?;
+    if !target.is_dir() {
+        return Err("That path is not a folder.".into());
+    }
+
+    let src = st.db_path();
+    if !src.is_file() {
+        return Err(format!(
+            "Current database file is missing: {}",
+            src.display()
+        ));
+    }
+
+    let target_db = target.join("library.db");
+    let mut backup = None;
+    if target_db.exists() {
+        let stamp = scan::now();
+        let dest = target.join(format!("library.db.bak-{stamp}"));
+        tokio::fs::rename(&target_db, &dest).await.map_err(|e| {
+            format!(
+                "Could not move the existing {} aside: {e}",
+                target_db.display()
+            )
+        })?;
+        backup = Some(dest.to_string_lossy().to_string());
+    }
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = target_db.clone().into_os_string();
+        sidecar.push(suffix);
+        let _ = tokio::fs::remove_file(PathBuf::from(sidecar)).await;
+    }
+
+    let db = st.db.clone();
+    let src_copy = src.clone();
+    let target_copy = target_db.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut guard = db.lock().map_err(|e| e.to_string())?;
+        guard
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| e.to_string())?;
+        std::fs::copy(&src_copy, &target_copy)
+            .map_err(|e| format!("Could not copy the database: {e}"))?;
+        let conn = db::open(&target_copy)
+            .map_err(|e| format!("Could not open the copied database: {e}"))?;
+        *guard = conn;
+        Ok(())
+    })
+    .await
+    .map_err(err)??;
+
+    // The old connection is gone; its WAL/SHM files are empty leftovers.
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = src.clone().into_os_string();
+        sidecar.push(suffix);
+        let _ = tokio::fs::remove_file(PathBuf::from(sidecar)).await;
+    }
+
+    *st.db_path.write().unwrap() = target_db.clone();
+    *st.data_dir.write().unwrap() = target.clone();
+    *st.data_warning.write().unwrap() = None;
+
+    let is_default = target == st.default_data_dir;
+    config::write(
+        &st.config_path,
+        &config::Config {
+            data_dir: if is_default {
+                None
+            } else {
+                Some(target.to_string_lossy().to_string())
+            },
+        },
+    )
+    .map_err(|e| format!("Database moved, but the setting could not be saved: {e}"))?;
+
+    Ok(DataDirInfo {
+        data_dir: target.to_string_lossy().to_string(),
+        db_path: target_db.to_string_lossy().to_string(),
+        backup,
+    })
 }
