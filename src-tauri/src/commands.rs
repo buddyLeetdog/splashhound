@@ -195,6 +195,15 @@ pub async fn duplicates(
 
 #[tauri::command]
 pub async fn remove_duplicate(state: State<'_, Arc<AppState>>, id: i64) -> Result<String, String> {
+    move_to_trash_inner(state, id).await
+}
+
+#[tauri::command]
+pub async fn trash_video(state: State<'_, Arc<AppState>>, id: i64) -> Result<String, String> {
+    move_to_trash_inner(state, id).await
+}
+
+async fn move_to_trash_inner(state: State<'_, Arc<AppState>>, id: i64) -> Result<String, String> {
     let st = state.inner().clone();
     let video = st.video(id).ok_or("Video not found.")?;
     let root = st.root_path().ok_or("No library folder configured.")?;

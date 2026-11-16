@@ -25,6 +25,8 @@ const state = {
   similar: [],
   dupsTab: 'exact',
   trash: [],
+  trashSelected: new Set(),
+  detail: null,
   dnaTimer: null,
   keep: {},
 };
@@ -1284,7 +1286,7 @@ async function loadThumbs(video, container, videoEl) {
 
 /* ------------------------------ detail ---------------------------------- */
 
-async function openDetail(id) {
+async function openDetail(id, options = {}) {
   let v;
   try {
     v = await invoke('get_video', { id });
@@ -1293,6 +1295,16 @@ async function openDetail(id) {
     return;
   }
   if (!v) return;
+
+  let ids = (options.ids && options.ids.length
+    ? options.ids
+    : state.lib.items.map((item) => item.id)).slice();
+  let index = options.index;
+  if (index === undefined) index = ids.indexOf(id);
+  if (index < 0 || !ids.includes(id)) {
+    ids = [id];
+    index = 0;
+  }
 
   modal(`
     <div class="detail">
@@ -1304,6 +1316,13 @@ async function openDetail(id) {
         <div class="thumb-strip" id="d-thumbs"></div>
       </div>
       <div class="detail-right">
+        <div class="row between" style="margin-bottom:6px">
+          <span class="muted small">${index + 1} / ${ids.length}</span>
+          <div class="row gap">
+            <button class="btn tiny" id="d-prev" ${index <= 0 ? 'disabled' : ''}>Prev</button>
+            <button class="btn tiny" id="d-next" ${index >= ids.length - 1 ? 'disabled' : ''}>Next</button>
+          </div>
+        </div>
         <h2 class="detail-title">${esc(v.fileName)}</h2>
         <div class="muted small">${esc(v.path)}</div>
         <dl class="meta-table">
@@ -1319,24 +1338,59 @@ async function openDetail(id) {
         ${editorHtml(v, 'd')}
         <div class="modal-actions">
           <button class="btn" id="d-reveal">Show in folder</button>
+          <button class="btn danger" id="d-delete">Move to trash</button>
           <button class="btn" data-close>Close</button>
           <button class="btn primary" id="d-save">Save</button>
         </div>
       </div>
     </div>`, {
     className: 'wide',
-    onClose() { state.playerToken += 1; },
-    onMount(root) {
+    onClose() {
+      state.detail = null;
+      state.playerToken += 1;
+    },
+    onMount(root, close) {
       const editor = createEditor(root, 'd', v);
       const videoEl = $('#d-video', root);
       playVideo(videoEl, $('#d-overlay', root), v);
       loadThumbs(v, $('#d-thumbs', root), videoEl);
+
+      const persist = async () => {
+        await invoke('save_video', { id: v.id, patch: editor.read() });
+      };
+      state.detail = { ids, index, editor, close, persist, video: v };
+
+      $('#d-prev', root).onclick = () => navigateDetail(-1);
+      $('#d-next', root).onclick = () => navigateDetail(1);
       $('#d-reveal', root).onclick = () => {
         invoke('reveal', { id: v.id }).catch((err) => toast(String(err), 'error'));
       };
+      $('#d-delete', root).onclick = async () => {
+        const ok = await confirmDialog({
+          title: 'Move this video to trash?',
+          message: `${v.fileName}\n\nIt will be moved to ${state.boot?.trashDir || 'the _trash folder'} and can be restored from the Trash view.`,
+          okLabel: 'Move to trash',
+          danger: true,
+        });
+        if (!ok) {
+          // The confirm dialog replaced this modal; bring it back.
+          openDetail(v.id, { ids, index });
+          return;
+        }
+        try {
+          await invoke('trash_video', { id: v.id });
+          state.detail = null;
+          close();
+          toast('Moved to trash.');
+          await refreshMeta();
+          loadLibrary(true);
+        } catch (err) {
+          toast(String(err), 'error');
+        }
+      };
       $('#d-save', root).onclick = async () => {
         try {
-          await invoke('save_video', { id: v.id, patch: editor.read() });
+          await persist();
           toast('Saved.');
           refreshMeta();
         } catch (err) {
@@ -1345,6 +1399,34 @@ async function openDetail(id) {
       };
     },
   });
+}
+
+async function navigateDetail(delta) {
+  const detail = state.detail;
+  if (!detail) return;
+  let index = detail.index + delta;
+  if (index < 0) return;
+  if (index >= detail.ids.length) {
+    if (delta > 0 && libraryCanLoadMore()) {
+      await loadLibrary(false);
+      detail.ids = state.lib.items.map((item) => item.id);
+      if (index >= detail.ids.length) {
+        toast('No more videos in this view.');
+        return;
+      }
+    } else {
+      toast('No more videos in this view.');
+      return;
+    }
+  }
+  const ids = detail.ids.slice();
+  try {
+    await detail.persist();
+  } catch (err) {
+    /* navigating with unsaved edits: keep the last successful state */
+  }
+  detail.close();
+  openDetail(ids[index], { ids, index });
 }
 
 /* ------------------------------- rate ----------------------------------- */
@@ -1452,6 +1534,7 @@ function renderRateCurrent() {
         </div>
         <div class="row gap" style="margin-top:8px">
           <button class="btn tiny" id="r-reveal">Show in folder</button>
+          <button class="btn tiny danger" id="r-delete">Move to trash</button>
         </div>
         <div class="kbd-hint">
           <kbd>Enter</kbd> save &amp; next \u00b7 <kbd>S</kbd> skip \u00b7 <kbd>1</kbd>-<kbd>5</kbd> rating<br>
@@ -1470,6 +1553,24 @@ function renderRateCurrent() {
   $('#r-save').onclick = () => saveAndNext();
   $('#r-skip').onclick = () => skipCurrent();
   $('#r-reveal').onclick = () => invoke('reveal', { id: v.id }).catch((err) => toast(String(err), 'error'));
+  $('#r-delete').onclick = async () => {
+    const ok = await confirmDialog({
+      title: 'Move this video to trash?',
+      message: `${v.fileName}\n\nIt will be moved to ${state.boot?.trashDir || 'the _trash folder'} and can be restored from the Trash view.`,
+      okLabel: 'Move to trash',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await invoke('trash_video', { id: v.id });
+      state.rate.queue.splice(state.rate.index, 1);
+      toast('Moved to trash.');
+      await refreshMeta();
+      renderRateCurrent();
+    } catch (err) {
+      toast(String(err), 'error');
+    }
+  };
 
   const sub = $('#rate-sub');
   if (sub) {
@@ -1617,6 +1718,14 @@ function renderDups() {
     $$('[data-reveal-id]', groupEl).forEach((b) => {
       b.onclick = () => invoke('reveal', { id: Number(b.dataset.revealId) })
         .catch((err) => toast(String(err), 'error'));
+    });
+    $$('[data-open-id]', groupEl).forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        const ids = group.videos.map((item) => item.id);
+        const openId = Number(b.dataset.openId);
+        openDetail(openId, { ids, index: ids.indexOf(openId) });
+      };
     });
     const auto = $('[data-auto-pick]', groupEl);
     if (auto) auto.onclick = () => { state.keep[md5] = autoPick(group.videos); syncKept(); };
@@ -1773,6 +1882,14 @@ function renderSimilar() {
       b.onclick = () => invoke('reveal', { id: Number(b.dataset.revealId) })
         .catch((err) => toast(String(err), 'error'));
     });
+    $$('[data-open-id]', groupEl).forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        const ids = group.videos.map((item) => item.id);
+        const openId = Number(b.dataset.openId);
+        openDetail(openId, { ids, index: ids.indexOf(openId) });
+      };
+    });
     const auto = $('[data-auto-pick]', groupEl);
     if (auto) auto.onclick = () => { state.keep[key] = autoPick(group.videos); syncKept(); };
     const trash = $('[data-trash]', groupEl);
@@ -1785,7 +1902,7 @@ function similarGroupHtml(group, index) {
     <tr data-id="${v.id}">
       <td><input type="radio" name="keep-sim-${index}" value="${v.id}" ${state.keep[`sim-${index}`] === v.id ? 'checked' : ''}></td>
       <td>
-        <div class="fname" title="${esc(v.path)}">${esc(v.fileName)}</div>
+        <button type="button" class="linkish fname" data-open-id="${v.id}" title="Open ${esc(v.fileName)}">${esc(v.fileName)}</button>
         <div class="muted small fname" title="${esc(v.path)}">${esc(v.path)}</div>
       </td>
       <td>${fmtSize(v.size)}</td>
@@ -1823,6 +1940,95 @@ function similarGroupHtml(group, index) {
     </section>`;
 }
 
+function autoPick(videos) {
+  const sorted = videos.slice().sort((a, b) => {
+    if (b.viewCount !== a.viewCount) return b.viewCount - a.viewCount;
+    return a.addedAt - b.addedAt;
+  });
+  return sorted[0].id;
+}
+
+function dupGroupHtml(group) {
+  return `
+    <section class="dup-group" data-md5="${esc(group.md5)}">
+      <div class="dup-head">
+        <span class="hash">${esc(group.md5.slice(0, 16))}...</span>
+        <span>${group.videos.length} copies</span>
+        <span class="save">${fmtSize(group.wasted)} recoverable</span>
+      </div>
+      <table class="dup-table">
+        <thead>
+          <tr>
+            <th style="width:34px">Keep</th>
+            <th>File</th>
+            <th style="width:90px">Size</th>
+            <th style="width:120px">Resolution</th>
+            <th style="width:80px">Duration</th>
+            <th style="width:90px">Views</th>
+            <th style="width:110px">Added</th>
+            <th style="width:90px"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${group.videos.map((v) => `
+            <tr data-id="${v.id}">
+              <td><input type="radio" name="keep-${esc(group.md5)}" value="${v.id}" ${state.keep[group.md5] === v.id ? 'checked' : ''}></td>
+              <td>
+                <button type="button" class="linkish fname" data-open-id="${v.id}" title="Open ${esc(v.fileName)}">${esc(v.fileName)}</button>
+                <div class="muted small fname" title="${esc(v.path)}">${esc(v.path)}</div>
+              </td>
+              <td>${fmtSize(v.size)}</td>
+              <td>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</td>
+              <td>${v.durationMs ? fmtDur(v.durationMs) : '-'}</td>
+              <td>${v.viewCount}</td>
+              <td>${fmtDate(v.addedAt)}</td>
+              <td><button class="btn tiny" data-reveal-id="${v.id}">Folder</button></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      <div class="dup-actions">
+        <button class="btn tiny" data-auto-pick>Auto-pick keeper</button>
+        <button class="btn danger" data-trash>Move others to trash</button>
+      </div>
+    </section>`;
+}
+
+async function trashOthers(group, key = group.md5) {
+  const keepId = state.keep[key];
+  const others = group.videos.filter((v) => v.id !== keepId);
+  if (!others.length) return;
+  const trash = state.boot?.trashDir || 'the library _trash folder';
+  const ok = await confirmDialog({
+    title: 'Move duplicates to trash?',
+    message: `Keeping:\n${group.videos.find((v) => v.id === keepId)?.fileName}\n\n` +
+      `Moving ${others.length} file${others.length === 1 ? '' : 's'} to:\n${trash}\n\n` +
+      'They can be restored from the Trash view.',
+    okLabel: 'Move to trash',
+    danger: true,
+  });
+  if (!ok) return;
+
+  let moved = 0;
+  for (const v of others) {
+    try {
+      await invoke('remove_duplicate', { id: v.id });
+      moved += 1;
+    } catch (err) {
+      toast(`Could not move ${v.fileName}: ${err}`, 'error');
+    }
+  }
+  if (String(key).startsWith('sim-')) {
+    state.similar = state.similar.filter((g) => g !== group);
+  } else {
+    state.dups = state.dups.filter((g) => g.md5 !== group.md5);
+  }
+  delete state.keep[key];
+  toast(`Moved ${moved} file${moved === 1 ? '' : 's'} to trash.`);
+  if (state.dupsTab === 'similar') renderSimilarTab();
+  else renderDups();
+  refreshMeta();
+}
+
 /* -------------------------------- trash --------------------------------- */
 
 async function viewTrash() {
@@ -1838,6 +2044,7 @@ async function viewTrash() {
     </header>
     <div id="trash-body"><div class="empty">Loading...</div></div>`;
   $('#trash-refresh').onclick = () => viewTrash();
+  state.trashSelected = new Set();
   try {
     state.trash = await invoke('trash_list');
   } catch (err) {
@@ -1852,6 +2059,7 @@ function renderTrash() {
   const sub = $('#trash-sub');
   if (!body) return;
   const entries = state.trash;
+  const selected = state.trashSelected;
   const total = entries.reduce((sum, entry) => sum + entry.size, 0);
   if (sub) {
     sub.textContent = entries.length
@@ -1865,10 +2073,19 @@ function renderTrash() {
       </div>`;
     return;
   }
+
   body.innerHTML = `
+    <div class="bulk-bar" style="position:static;margin-bottom:12px">
+      <span class="small" id="trash-sel-count">${selected.size} selected</span>
+      <button class="btn tiny" id="trash-select-all">Select all</button>
+      <button class="btn tiny" id="trash-restore-sel" ${selected.size ? '' : 'disabled'}>Restore selected</button>
+      <button class="btn tiny danger" id="trash-del-sel" ${selected.size ? '' : 'disabled'}>Delete selected</button>
+      <button class="btn tiny danger" id="trash-del-all">Delete all</button>
+    </div>
     <table class="dup-table trash-table">
       <thead>
         <tr>
+          <th style="width:30px"></th>
           <th>File</th>
           <th style="width:90px">Size</th>
           <th>Original location</th>
@@ -1879,6 +2096,7 @@ function renderTrash() {
       <tbody>
         ${entries.map((entry) => `
           <tr data-id="${entry.id}">
+            <td><input type="checkbox" class="trash-check" data-id="${entry.id}" ${selected.has(entry.id) ? 'checked' : ''}></td>
             <td><div class="fname" title="${esc(entry.trashedPath)}">${esc(entry.fileName)}</div></td>
             <td>${fmtSize(entry.size)}</td>
             <td><div class="muted small fname" title="${esc(entry.originalPath)}">${esc(entry.originalPath)}</div></td>
@@ -1890,6 +2108,98 @@ function renderTrash() {
           </tr>`).join('')}
       </tbody>
     </table>`;
+
+  const refreshBar = () => {
+    const label = $('#trash-sel-count');
+    if (label) label.textContent = `${selected.size} selected`;
+    const restore = $('#trash-restore-sel');
+    if (restore) restore.disabled = selected.size === 0;
+    const del = $('#trash-del-sel');
+    if (del) del.disabled = selected.size === 0;
+  };
+
+  const syncChecks = () => {
+    $$('.trash-check').forEach((box) => {
+      box.checked = selected.has(Number(box.dataset.id));
+    });
+    refreshBar();
+  };
+
+  $$('.trash-check').forEach((box) => {
+    box.onchange = () => {
+      const id = Number(box.dataset.id);
+      if (box.checked) selected.add(id);
+      else selected.delete(id);
+      refreshBar();
+    };
+  });
+
+  const bulkRestore = async (ids) => {
+    let ok = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await invoke('restore_trash', { id });
+        ok += 1;
+      } catch (err) {
+        failed += 1;
+      }
+    }
+    toast(`Restored ${ok} file${ok === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'info');
+    selected.clear();
+    await refreshMeta();
+    viewTrash();
+  };
+
+  const bulkDelete = async (ids) => {
+    let ok = 0;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await invoke('delete_trash', { id });
+        ok += 1;
+      } catch (err) {
+        failed += 1;
+      }
+    }
+    toast(`Deleted ${ok} file${ok === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'info');
+    selected.clear();
+    await refreshMeta();
+    viewTrash();
+  };
+
+  $('#trash-select-all').onclick = () => {
+    entries.forEach((entry) => selected.add(entry.id));
+    syncChecks();
+  };
+
+  $('#trash-restore-sel').onclick = () => {
+    const ids = Array.from(selected);
+    if (ids.length) bulkRestore(ids);
+  };
+
+  $('#trash-del-sel').onclick = async () => {
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    const ok = await confirmDialog({
+      title: `Delete ${ids.length} file${ids.length === 1 ? '' : 's'} permanently?`,
+      message: 'They will be erased from disk. This cannot be undone.',
+      okLabel: 'Delete forever',
+      danger: true,
+    });
+    if (ok) bulkDelete(ids);
+  };
+
+  $('#trash-del-all').onclick = async () => {
+    if (!entries.length) return;
+    const ok = await confirmDialog({
+      title: `Delete all ${entries.length} files permanently?`,
+      message: 'Every file in the trash will be erased from disk. This cannot be undone.',
+      okLabel: 'Delete everything',
+      danger: true,
+    });
+    if (ok) bulkDelete(entries.map((entry) => entry.id));
+  };
 
   $$('tbody tr', body).forEach((row) => {
     const id = Number(row.dataset.id);
@@ -1927,95 +2237,6 @@ function renderTrash() {
       };
     }
   });
-}
-
-function autoPick(videos) {
-  const sorted = videos.slice().sort((a, b) => {
-    if (b.viewCount !== a.viewCount) return b.viewCount - a.viewCount;
-    return a.addedAt - b.addedAt;
-  });
-  return sorted[0].id;
-}
-
-function dupGroupHtml(group) {
-  return `
-    <section class="dup-group" data-md5="${esc(group.md5)}">
-      <div class="dup-head">
-        <span class="hash">${esc(group.md5.slice(0, 16))}...</span>
-        <span>${group.videos.length} copies</span>
-        <span class="save">${fmtSize(group.wasted)} recoverable</span>
-      </div>
-      <table class="dup-table">
-        <thead>
-          <tr>
-            <th style="width:34px">Keep</th>
-            <th>File</th>
-            <th style="width:90px">Size</th>
-            <th style="width:120px">Resolution</th>
-            <th style="width:80px">Duration</th>
-            <th style="width:90px">Views</th>
-            <th style="width:110px">Added</th>
-            <th style="width:90px"></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${group.videos.map((v) => `
-            <tr data-id="${v.id}">
-              <td><input type="radio" name="keep-${esc(group.md5)}" value="${v.id}" ${state.keep[group.md5] === v.id ? 'checked' : ''}></td>
-              <td>
-                <div class="fname" title="${esc(v.path)}">${esc(v.fileName)}</div>
-                <div class="muted small fname" title="${esc(v.path)}">${esc(v.path)}</div>
-              </td>
-              <td>${fmtSize(v.size)}</td>
-              <td>${v.width ? `${v.width}\u00d7${v.height}` : '-'}</td>
-              <td>${v.durationMs ? fmtDur(v.durationMs) : '-'}</td>
-              <td>${v.viewCount}</td>
-              <td>${fmtDate(v.addedAt)}</td>
-              <td><button class="btn tiny" data-reveal-id="${v.id}">Folder</button></td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-      <div class="dup-actions">
-        <button class="btn tiny" data-auto-pick>Auto-pick keeper</button>
-        <button class="btn danger" data-trash>Move others to trash</button>
-      </div>
-    </section>`;
-}
-
-async function trashOthers(group, key = group.md5) {
-  const keepId = state.keep[key];
-  const others = group.videos.filter((v) => v.id !== keepId);
-  if (!others.length) return;
-  const trash = state.boot?.trashDir || 'the library _trash folder';
-  const ok = await confirmDialog({
-    title: 'Move duplicates to trash?',
-    message: `Keeping:\n${group.videos.find((v) => v.id === keepId)?.fileName}\n\n` +
-      `Moving ${others.length} file${others.length === 1 ? '' : 's'} to:\n${trash}\n\n` +
-      'They can be restored from that folder.',
-    okLabel: 'Move to trash',
-    danger: true,
-  });
-  if (!ok) return;
-
-  let moved = 0;
-  for (const v of others) {
-    try {
-      await invoke('remove_duplicate', { id: v.id });
-      moved += 1;
-    } catch (err) {
-      toast(`Could not move ${v.fileName}: ${err}`, 'error');
-    }
-  }
-  if (String(key).startsWith('sim-')) {
-    state.similar = state.similar.filter((g) => g !== group);
-  } else {
-    state.dups = state.dups.filter((g) => g.md5 !== group.md5);
-  }
-  delete state.keep[key];
-  toast(`Moved ${moved} file${moved === 1 ? '' : 's'} to trash.`);
-  if (state.dupsTab === 'similar') renderSimilarTab();
-  else renderDups();
-  refreshMeta();
 }
 
 /* ------------------------------ settings -------------------------------- */
@@ -2532,6 +2753,14 @@ function renderScanPanelOnly() {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && modalCloser) {
     modalCloser();
+    return;
+  }
+  if (state.detail && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && $('#d-video')) {
+    const tag = (e.target?.tagName || '').toLowerCase();
+    const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
+    if (!document.fullscreenElement && typing) return;
+    e.preventDefault();
+    navigateDetail(e.key === 'ArrowRight' ? 1 : -1);
     return;
   }
   if (modalCloser) return;

@@ -276,6 +276,7 @@ pub fn run() {
             commands::rating_queue,
             commands::duplicates,
             commands::remove_duplicate,
+            commands::trash_video,
             commands::mark_viewed,
             commands::prepare_playback,
             commands::playback_status,
