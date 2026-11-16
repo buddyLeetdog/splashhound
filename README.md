@@ -114,8 +114,9 @@ plus rating distribution, toy counts, creators and folder counts.
 
 ### Old codecs
 Lists every video whose streams the built-in player cannot decode — WMV/VC-1,
-MPEG-1/2, MPEG-4 ASP (Xvid/DivX), Sorenson FLV, Indeo, MJPEG and high-bit-depth
-H.264 — with codec, resolution, size and length. Select files and either:
+MPEG-1/2, MPEG-4 ASP (Xvid/DivX), Sorenson FLV, Indeo, MJPEG, high-bit-depth
+H.264, and HEVC when the webview has no HEVC decoder — with codec, resolution,
+size and length. Select files and either:
 
 - **Build playback cache** — converts them into the playback cache. Nothing on
   disk changes, playback starts instantly afterwards, and the entries count
@@ -219,6 +220,11 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
 ## Playback
 
 - MP4/MOV/WebM with H.264, VP8, VP9 or AV1 play directly.
+- HEVC/H.265 plays directly when the WebView2 runtime reports an HEVC decoder —
+  on Windows that means the *HEVC Video Extensions* package (or an OEM
+  equivalent) plus a GPU that supports it. The app probes this at startup
+  instead of assuming, so those files are only converted when they would not
+  play. 4:2:2 and 4:4:4 HEVC always need conversion.
 - Any other container that holds a decodable video stream — MKV, TS/M2TS, FLV,
   AVI, MPG — is remuxed to a cached MP4. The video is copied bit for bit; the
   audio is copied as well when MP4 can hold it (AAC, MP3) and re-encoded to AAC

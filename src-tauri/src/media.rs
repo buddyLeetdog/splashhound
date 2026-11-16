@@ -2,7 +2,10 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::SystemTime,
 };
 
@@ -40,6 +43,30 @@ pub struct ProbeInfo {
     pub format_name: Option<String>,
 }
 
+/// Codecs the running WebView2 can decode that Chromium does not ship itself.
+/// HEVC is available on Windows when the "HEVC Video Extensions" package is
+/// installed and the GPU supports it, so the frontend probes it at startup.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Caps {
+    pub hevc8: bool,
+    pub hevc10: bool,
+}
+
+static HEVC8: AtomicBool = AtomicBool::new(false);
+static HEVC10: AtomicBool = AtomicBool::new(false);
+
+pub fn set_capabilities(hevc8: bool, hevc10: bool) {
+    HEVC8.store(hevc8, Ordering::Relaxed);
+    HEVC10.store(hevc10, Ordering::Relaxed);
+}
+
+pub fn capabilities() -> Caps {
+    Caps {
+        hevc8: HEVC8.load(Ordering::Relaxed),
+        hevc10: HEVC10.load(Ordering::Relaxed),
+    }
+}
+
 /// Chromium decodes H.264 only as 8-bit 4:2:0 — Hi10P and 4:2:2 files fail with
 /// a black frame. Rows indexed by older builds have no pixel format stored, so
 /// assume the common case instead of re-encoding them all.
@@ -50,6 +77,22 @@ fn h264_decodable(pix_fmt: Option<&str>) -> bool {
             p.to_ascii_lowercase().as_str(),
             "yuv420p" | "yuvj420p" | "nv12"
         ),
+    }
+}
+
+fn hevc_decodable(pix_fmt: Option<&str>, caps: Caps) -> bool {
+    let Some(p) = pix_fmt else {
+        return caps.hevc8;
+    };
+    let p = p.to_ascii_lowercase();
+    // Hardware decoders only handle 4:2:0; 4:2:2/4:4:4 files need a re-encode.
+    if p.contains("422") || p.contains("444") {
+        return false;
+    }
+    if p.contains("10") {
+        caps.hevc10
+    } else {
+        caps.hevc8
     }
 }
 
@@ -70,11 +113,23 @@ pub fn audio_copyable(acodec: Option<&str>) -> bool {
 /// Only the elementary streams matter to the browser, not the container: any
 /// container ffmpeg reads (MKV, TS/M2TS, FLV, AVI, …) can be remuxed into MP4.
 /// VP8 is excluded from remux because Chromium has no MP4 mapping for it.
+/// HEVC counts as decodable when the webview reported an HEVC decoder (the
+/// Windows "HEVC Video Extensions" package or an OEM equivalent).
 pub fn playback_str(
     ext: &str,
     vcodec: Option<&str>,
     acodec: Option<&str>,
     pix_fmt: Option<&str>,
+) -> &'static str {
+    classify(ext, vcodec, acodec, pix_fmt, capabilities())
+}
+
+fn classify(
+    ext: &str,
+    vcodec: Option<&str>,
+    acodec: Option<&str>,
+    pix_fmt: Option<&str>,
+    caps: Caps,
 ) -> &'static str {
     let ext = ext.to_ascii_lowercase();
     let v = vcodec.unwrap_or("").to_ascii_lowercase();
@@ -85,6 +140,7 @@ pub fn playback_str(
     let playable_video = match v.as_str() {
         "h264" => h264_decodable(pix_fmt),
         "vp8" | "vp9" | "av1" => true,
+        "hevc" | "h265" => hevc_decodable(pix_fmt, caps),
         _ => false,
     };
     if browser_ext && playable_video && browser_a {
@@ -93,6 +149,7 @@ pub fn playback_str(
     let copyable_video = match v.as_str() {
         "h264" => h264_decodable(pix_fmt),
         "vp9" | "av1" => true,
+        "hevc" | "h265" => hevc_decodable(pix_fmt, caps),
         _ => false,
     };
     if copyable_video {
@@ -458,6 +515,13 @@ async fn ffmpeg_convert(
     if remux {
         // Video is copied bit for bit; only the container changes.
         cmd.args(["-c:v", "copy"]);
+        // HEVC in MP4 has to be tagged `hvc1` for the browser to accept it.
+        if matches!(
+            v.vcodec.as_deref().map(|c| c.to_ascii_lowercase()),
+            Some(ref c) if c == "hevc" || c == "h265"
+        ) {
+            cmd.args(["-tag:v", "hvc1"]);
+        }
     } else {
         cmd.args([
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
@@ -741,6 +805,36 @@ mod tests {
         );
         // Rows from older builds have no pixel format: assume 8-bit 4:2:0.
         assert_eq!(mode("mp4", Some("h264"), Some("aac"), None), "direct");
+    }
+
+    #[test]
+    fn hevc_is_played_when_the_webview_supports_it() {
+        let off = Caps::default();
+        let main = Caps {
+            hevc8: true,
+            hevc10: false,
+        };
+        let both = Caps {
+            hevc8: true,
+            hevc10: true,
+        };
+        let hevc = |pix: Option<&str>, caps| classify("mp4", Some("hevc"), Some("aac"), pix, caps);
+
+        // Decoder available: play the file as it is.
+        assert_eq!(hevc(Some("yuv420p"), both), "direct");
+        assert_eq!(hevc(Some("yuv420p10le"), both), "direct");
+        // 8-bit works but Main10 does not: only the 10-bit files are converted.
+        assert_eq!(hevc(Some("yuv420p"), main), "direct");
+        assert_eq!(hevc(Some("yuv420p10le"), main), "transcode");
+        // No HEVC decoder in the webview at all.
+        assert_eq!(hevc(Some("yuv420p"), off), "transcode");
+        // 4:2:2/4:4:4 HEVC is outside what hardware decoders accept.
+        assert_eq!(hevc(Some("yuv422p10le"), both), "transcode");
+        // Unsupported container: copy the stream into MP4 instead.
+        assert_eq!(
+            classify("mkv", Some("hevc"), Some("aac"), Some("yuv420p"), main),
+            "remux"
+        );
     }
 
     #[test]

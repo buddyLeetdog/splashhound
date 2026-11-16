@@ -349,6 +349,19 @@ pub async fn mark_viewed(state: State<'_, Arc<AppState>>, id: i64) -> Result<i64
 
 /* --------------------------- old codec view ----------------------------- */
 
+/// Called once at startup: the webview reports which extra codecs it can decode.
+#[tauri::command]
+pub async fn set_playable_codecs(hevc8: bool, hevc10: bool) -> Result<(), String> {
+    media::set_capabilities(hevc8, hevc10);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn playable_codecs() -> Result<serde_json::Value, String> {
+    let caps = media::capabilities();
+    Ok(serde_json::json!({ "hevc8": caps.hevc8, "hevc10": caps.hevc10 }))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OldCodecItem {

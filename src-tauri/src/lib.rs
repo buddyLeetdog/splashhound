@@ -290,6 +290,8 @@ pub fn run() {
             commands::prepare_playback,
             commands::playback_status,
             commands::old_codecs,
+            commands::set_playable_codecs,
+            commands::playable_codecs,
             commands::convert_start,
             commands::convert_status,
             commands::convert_cancel,

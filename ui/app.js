@@ -291,6 +291,19 @@ async function init() {
     if (e.deltaY > 0) maybeLoadMoreLibrary();
   }, { passive: true });
   try {
+    // Ask the webview which codecs beyond Chromium's built-in set it can decode.
+    // HEVC needs the Windows "HEVC Video Extensions" package (or an OEM
+    // equivalent) plus a GPU that supports it, so it has to be detected, not
+    // assumed — otherwise those files would be converted for nothing.
+    const probe = document.createElement('video');
+    const canPlay = (codec) =>
+      probe.canPlayType(`video/mp4; codecs="${codec}"`) !== '' ||
+      !!(window.MediaSource && MediaSource.isTypeSupported(`video/mp4; codecs="${codec}"`));
+    const hevc8 = canPlay('hvc1.1.6.L120.90');
+    const hevc10 = canPlay('hvc1.2.4.L120.90');
+    state.playable = { hevc8, hevc10 };
+    await invoke('set_playable_codecs', { hevc8, hevc10 }).catch(() => {});
+
     const boot = await invoke('bootstrap');
     state.boot = boot;
     state.visibleFlags = boot.visibleFlags || state.visibleFlags;
