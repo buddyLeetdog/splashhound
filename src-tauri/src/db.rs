@@ -1077,7 +1077,7 @@ pub fn creators(conn: &Connection) -> Result<Vec<String>> {
     Ok(out)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VideoPatch {
     pub creator: Option<String>,
@@ -1091,24 +1091,6 @@ pub struct VideoPatch {
     pub reviewed: Option<bool>,
     pub tags: Option<Vec<String>>,
     pub toys: Option<Vec<String>>,
-}
-
-impl Default for VideoPatch {
-    fn default() -> Self {
-        Self {
-            creator: None,
-            nsfw: None,
-            popping: None,
-            destruction: None,
-            deflation: None,
-            inflation: None,
-            notes: None,
-            rating: None,
-            reviewed: None,
-            tags: None,
-            toys: None,
-        }
-    }
 }
 
 pub fn save_video(conn: &mut Connection, id: i64, p: &VideoPatch) -> Result<VideoDto> {
@@ -1222,6 +1204,7 @@ pub struct Upsert {
     pub changed: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn upsert_file(
     conn: &Connection,
     path: &str,
@@ -1687,6 +1670,7 @@ pub struct TrashEntry {
     pub trashed_at: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn trash_add(
     conn: &Connection,
     original_path: &str,
@@ -1753,9 +1737,10 @@ pub fn trash_delete(conn: &Connection, id: i64) -> Result<()> {
 
 /* ------------------------------- video DNA ------------------------------ */
 
-pub fn dna_pending(
-    conn: &Connection,
-) -> Result<Vec<(i64, String, Option<i64>, Option<i64>, Option<i64>)>> {
+/// (video id, path, duration, width, height)
+type DnaPending = (i64, String, Option<i64>, Option<i64>, Option<i64>);
+
+pub fn dna_pending(conn: &Connection) -> Result<Vec<DnaPending>> {
     let mut stmt = conn.prepare(
         "SELECT v.id, v.path, v.duration_ms, v.width, v.height FROM videos v
          WHERE v.missing = 0 AND v.dna_failed = 0
@@ -1890,7 +1875,7 @@ struct DnaRow {
 /// Groups of videos whose sampled frame hashes match, even when the files are
 /// re-encodes, different resolutions or slightly different bitrates.
 pub fn similar_groups(conn: &Connection) -> Result<Vec<SimilarGroup>> {
-    let rows: Vec<(i64, String, Option<i64>, Option<i64>, Option<i64>)> = {
+    let rows: Vec<DnaPending> = {
         let mut stmt = conn.prepare(
             "SELECT d.video_id, d.frames, d.duration_ms, d.width, d.height
              FROM video_dna d JOIN videos v ON v.id = d.video_id

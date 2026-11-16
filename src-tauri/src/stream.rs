@@ -210,15 +210,12 @@ fn encoder_args(name: &str, level: &str, gop: i64, software_frames: bool) -> Vec
             args.push("yuv420p".into());
         }
     }
-    args.extend(
-        [
-            "-g".to_string(),
-            gop.to_string(),
-            "-keyint_min".to_string(),
-            gop.to_string(),
-        ]
-        .into_iter(),
-    );
+    args.extend([
+        "-g".to_string(),
+        gop.to_string(),
+        "-keyint_min".to_string(),
+        gop.to_string(),
+    ]);
     if name == "libx264" {
         args.push("-sc_threshold".into());
         args.push("0".into());
@@ -459,6 +456,7 @@ async fn pump(state: std::sync::Arc<AppState>, id: i64, start: f64, socket: WebS
 
 /// Streams one encoder's output. Returns the byte count, or an error plus the
 /// byte count when it stopped part way through.
+#[allow(clippy::too_many_arguments)]
 async fn stream_with(
     sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     closed: &mut tokio::task::JoinHandle<()>,

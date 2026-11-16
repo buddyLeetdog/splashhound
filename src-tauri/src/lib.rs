@@ -98,9 +98,13 @@ pub struct AppState {
     pub thumb_locks: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>>,
     pub convert_permits: Arc<tokio::sync::Semaphore>,
     pub thumb_permits: Arc<tokio::sync::Semaphore>,
+    /// Placeholder generation, kept separate from the thumbnails so a poster
+    /// request that creates one cannot deadlock on the permit it already holds.
+    pub lowres_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conn: rusqlite::Connection,
         db_path: PathBuf,
@@ -116,7 +120,7 @@ impl AppState {
             // Placeholder size is part of the stored image; drop old ones when it
             // changes so they are regenerated at the new size.
             let version = format!("w{}", media::lowres_width());
-            if let Ok(_) = db::ensure_lowres_version(&conn, &version) {}
+            let _ = db::ensure_lowres_version(&conn, &version);
         }
         let state = Self {
             db: Arc::new(Mutex::new(conn)),
@@ -139,6 +143,7 @@ impl AppState {
             // Two at a time measured fastest for cold posters on a mechanical
             // disk (12 posters: 74 ms each at 2 workers, 119 ms at 3, 142 ms at 6).
             thumb_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+            lowres_permits: Arc::new(tokio::sync::Semaphore::new(2)),
         };
         state.refresh_ffmpeg();
         state

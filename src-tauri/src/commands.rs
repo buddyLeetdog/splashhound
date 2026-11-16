@@ -325,9 +325,17 @@ async fn move_into_place(src: &Path, target: &Path) -> Result<(), String> {
         }
         // Copy+delete works when only the rename is blocked (read-only sharing).
         if attempt >= 4 {
-            if tokio::fs::copy(src, target).await.is_ok() {
-                let _ = tokio::fs::remove_file(src).await;
-                return Ok(());
+            let copied = tokio::fs::copy(src, target).await.is_ok();
+            if copied {
+                match tokio::fs::remove_file(src).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        // Leave nothing behind: a copy without the original gone
+                        // would duplicate the file in the library.
+                        let _ = tokio::fs::remove_file(target).await;
+                        last_error = e.to_string();
+                    }
+                }
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
@@ -401,8 +409,8 @@ pub(crate) async fn trash_by_id(st: &Arc<AppState>, id: i64) -> Result<String, S
         );
         db::delete_video(&mut conn, id).map_err(err)?;
     }
-    let _ = tokio::fs::remove_dir_all(media::thumb_dir(&st, &video)).await;
-    let _ = tokio::fs::remove_file(media::play_cache_path(&st, &video)).await;
+    let _ = tokio::fs::remove_dir_all(media::thumb_dir(st, &video)).await;
+    let _ = tokio::fs::remove_file(media::play_cache_path(st, &video)).await;
 
     Ok(target.to_string_lossy().to_string())
 }
@@ -582,6 +590,20 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
     // constant frame rate, so it also fixes stuttering VFR files. Remux cases
     // (browser codec, unusual container or audio) used to be copied into the
     // cache first, which cost several seconds per file; they stream instead.
+    if st.ffmpeg().is_none() && (mode != "direct" || video.vfr) {
+        return PlaybackInfo {
+            mode,
+            state: "error".into(),
+            url: None,
+            progress: 0.0,
+            error: Some(
+                "ffmpeg was not found, so this file cannot be played. \
+                 Install ffmpeg (winget install Gyan.FFmpeg) and restart the app."
+                    .into(),
+            ),
+            stream_mime: None,
+        };
+    }
     if (mode != "direct" || video.vfr) && st.setting("native_player").as_deref() != Some("0") {
         let (_, codec) = stream::profile_for(video.width, video.height);
         return PlaybackInfo {

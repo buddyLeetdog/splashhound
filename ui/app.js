@@ -1585,14 +1585,28 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
     setTimeout(showFinished, Math.max(500, remaining * 1000 + 1200));
   };
 
+  let pumpRetries = 0;
   const pump = () => {
     if (!source || source.updating || !queue.length) return;
     const chunk = queue.shift();
     try {
       source.appendBuffer(chunk);
+      pumpRetries = 0;
+      return;
     } catch (err) {
-      // Not enough buffer space yet: retry after the next updateend.
       queue.unshift(chunk);
+      // The `source.updating` guard above means a throw is not "busy": the
+      // MediaSource quota is full. Drop played history, then retry. Also retry
+      // on a timer, because waiting for an updateend that never comes would
+      // stall the stream forever.
+      if (err && err.name === 'QuotaExceededError') {
+        trimBehind();
+        try { source.remove(0, videoEl.currentTime); } catch (e) { /* ignore */ }
+      }
+      if (pumpRetries < 20) {
+        pumpRetries += 1;
+        setTimeout(pump, 150);
+      }
     }
   };
 
@@ -1654,7 +1668,10 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
           return;
         }
         if (videoEl.readyState >= 2) {
-          showFinished();
+          // The decoder stopped without saying why. End the stream cleanly and
+          // let whatever is already buffered play out, instead of claiming the
+          // video finished while seconds of it are still queued.
+          finishWhenDrained();
         } else {
           fail('The decoder stopped before producing video.');
         }
@@ -2045,7 +2062,7 @@ function playVideo(videoEl, overlay, video, onReady) {
   (async () => {
     // Start the decoder immediately if the built-in player is going to be used;
     // it runs while the dialog renders, so the first frame is ready sooner.
-    const willStream = (video.playback === 'transcode' || video.vfr) && state.boot?.nativePlayer;
+    const willStream = (video.playback !== 'direct' || video.vfr) && state.boot?.nativePlayer;
     let warm = willStream ? openStreamSocket(video, 0) : null;
     const dropWarm = () => {
       if (warm) {

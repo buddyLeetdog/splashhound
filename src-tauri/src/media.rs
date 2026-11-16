@@ -244,12 +244,14 @@ pub async fn probe(ffprobe: &Path, file: &Path) -> Result<ProbeInfo> {
     }
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
-    let mut info = ProbeInfo::default();
-    info.format_name = json
-        .get("format")
-        .and_then(|f| f.get("format_name"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let mut info = ProbeInfo {
+        format_name: json
+            .get("format")
+            .and_then(|f| f.get("format_name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        ..Default::default()
+    };
     if let Some(d) = json
         .get("format")
         .and_then(|f| f.get("duration"))
@@ -469,10 +471,23 @@ pub async fn ensure_lowres(state: &Arc<AppState>, v: &VideoDto) -> bool {
     if !poster.is_file() {
         return false;
     }
+    // Bounded like the thumbnails: a page of cards can ask for many at once.
+    let Some(_permit) = state.lowres_permits.acquire().await.ok() else {
+        return false;
+    };
+    // Another request may have produced it while we waited for a permit.
+    if let Ok(conn) = state.db.lock() {
+        if db::thumb_small(&conn, v.id).is_some() {
+            return true;
+        }
+    }
     let Some(ffmpeg) = state.ffmpeg() else {
         return false;
     };
-    let tmp = poster.with_extension("low.jpg");
+    // Unique temp name: concurrent callers for the same poster must not collide.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = poster.with_extension(format!("low{seq}.jpg"));
     let _ = tokio::fs::remove_file(&tmp).await;
     let ok = quiet_command(&ffmpeg.ffmpeg)
         .args(["-hide_banner", "-v", "error", "-nostdin", "-y", "-i"])
