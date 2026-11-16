@@ -427,3 +427,10 @@ kbd {
 #f-folder { max-width: 230px; }
 #rate-folder { max-width: 260px; }
 
+
+/* ---------- toys ---------- */
+.badge.toy { background: rgba(255, 199, 55, 0.14); color: #ffe08a; border-color: rgba(255, 199, 55, 0.32); }
+.chip.toy { background: rgba(255, 199, 55, 0.12); border-color: rgba(255, 199, 55, 0.30); color: #ffe4a3; }
+.chip.toy.active { background: rgba(255, 199, 55, 0.26); border-color: #c99a2e; color: #fff3c8; }
+.toy-row { display: grid; grid-template-columns: 1fr auto auto auto; align-items: center; gap: 8px; padding: 5px 4px; border-bottom: 1px solid var(--line-soft); }
+.toy-row:last-child { border-bottom: none; }

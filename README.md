@@ -103,7 +103,9 @@ deflation, inflation, notes, rating (0–5), reviewed, view count, last viewed,
 date added, missing.
 
 Tags live in a separate `tags` table with a `video_tags` join table, so the
-"other tags" field is a proper many-to-many tag set.
+"other tags" field is a proper many-to-many tag set. Toys use their own
+`toys` / `video_toys` tables, so the inflatable shown in a video can be tagged
+and filtered independently of general tags.
 
 Generated preview frames and converted playback files are cached in
 `%LOCALAPPDATA%\com.splashhound.desktop` and can be cleared from Settings.
@@ -129,7 +131,7 @@ It runs on demand from that tab, is incremental and cancellable, and persists.
 
 - **Folders**: filter the library by subfolder; "Rate this folder" scopes the
   rating queue to the current folder selection.
-- **Batch editing**: click Select, pick many cards, then set tags, creator,
+- **Batch editing**: click Select, pick many cards, then set tags, toys, creator,
   flags, rating or reviewed state for all of them.
 - **Trash**: files moved out of the library are recorded there and can be
   restored with their tags/ratings, or deleted permanently.

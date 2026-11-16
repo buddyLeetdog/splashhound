@@ -114,11 +114,12 @@ function refreshChrome() {
 
 async function refreshMeta() {
   try {
-    const [stats, tags, creators, folders] = await Promise.all([
-      invoke('stats'), invoke('all_tags'), invoke('creators'), invoke('folders'),
+    const [stats, tags, toys, creators, folders] = await Promise.all([
+      invoke('stats'), invoke('all_tags'), invoke('all_toys'), invoke('creators'), invoke('folders'),
     ]);
     state.stats = stats;
     state.tags = tags;
+    state.toys = toys;
     state.creators = creators;
     state.folders = folders;
     refreshChrome();
@@ -285,6 +286,7 @@ function defaultFilter() {
     search: '',
     tags: [],
     tagMode: 'any',
+    toys: [],
     nsfw: 'any',
     reviewed: 'any',
     minRating: 0,
@@ -349,10 +351,12 @@ function viewLibrary() {
         <option value="random">Random</option>
       </select>
       <button class="btn" id="f-tags-btn">Tags <span class="pill" id="tag-count">0</span></button>
+      <button class="btn" id="f-toys-btn">Toys <span class="pill" id="toy-count">0</span></button>
       <button class="btn" id="f-select">Select</button>
     </div>
 
     <div class="tag-filter hidden" id="tag-filter"></div>
+    <div class="tag-filter hidden" id="toy-filter"></div>
     <div class="chips" id="active-filters" style="margin-bottom:12px"></div>
 
     <div class="bulk-bar hidden" id="bulk-bar">
@@ -390,6 +394,9 @@ function viewLibrary() {
 
   $('#f-tags-btn').addEventListener('click', () => {
     $('#tag-filter').classList.toggle('hidden');
+  });
+  $('#f-toys-btn').addEventListener('click', () => {
+    $('#toy-filter').classList.toggle('hidden');
   });
   $('#lib-refresh').addEventListener('click', () => { loadLibrary(true); refreshMeta(); });
   $('#lib-reshuffle').addEventListener('click', () => {
@@ -441,12 +448,14 @@ function viewLibrary() {
   });
 
   $('#tag-count').textContent = f.tags.length;
+  $('#toy-count').textContent = f.toys.length;
   $('#f-select').classList.toggle('primary', state.lib.selectMode);
   $('#f-select').textContent = state.lib.selectMode ? 'Done' : 'Select';
   grid.classList.toggle('selecting', state.lib.selectMode);
   updateRateFolderButton();
   updateBulkBar();
   renderTagFilter();
+  renderToyFilter();
   renderActiveFilters();
   loadLibrary(true);
 }
@@ -549,6 +558,14 @@ async function openBulkEditor() {
         <label>Remove tags</label>
         <input class="input" id="b-remove-tags" placeholder="comma separated">
       </div>
+      <div class="field">
+        <label>Add toys</label>
+        <input class="input" id="b-add-toys" placeholder="comma separated">
+      </div>
+      <div class="field">
+        <label>Remove toys</label>
+        <input class="input" id="b-remove-toys" placeholder="comma separated">
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn" data-close>Cancel</button>
@@ -560,6 +577,8 @@ async function openBulkEditor() {
           ids,
           addTags: $('#b-add-tags', root).value.split(',').map((s) => s.trim()).filter(Boolean),
           removeTags: $('#b-remove-tags', root).value.split(',').map((s) => s.trim()).filter(Boolean),
+          addToys: $('#b-add-toys', root).value.split(',').map((s) => s.trim()).filter(Boolean),
+          removeToys: $('#b-remove-toys', root).value.split(',').map((s) => s.trim()).filter(Boolean),
         };
         const creator = $('#b-creator', root).value.trim();
         if ($('#b-clear-creator', root).checked) edit.creator = '';
@@ -635,7 +654,9 @@ function renderActiveFilters() {
   if (!wrap) return;
   const f = state.lib.filter;
   wrap.innerHTML = f.tags.map((t) => `
-      <span class="chip active">${esc(t)}<button class="chip-x" data-remove="${esc(t)}">...</button></span>`).join('');
+      <span class="chip active">${esc(t)}<button class="chip-x" data-remove="${esc(t)}">\u00d7</button></span>`).join('')
+    + f.toys.map((t) => `
+      <span class="chip active toy">${esc(t)}<button class="chip-x" data-remove-toy="${esc(t)}">\u00d7</button></span>`).join('');
   $$('[data-remove]', wrap).forEach((b) => {
     b.onclick = () => {
       f.tags = f.tags.filter((t) => t !== b.dataset.remove);
@@ -645,6 +666,50 @@ function renderActiveFilters() {
       loadLibrary(true);
     };
   });
+  $$('[data-remove-toy]', wrap).forEach((b) => {
+    b.onclick = () => {
+      f.toys = f.toys.filter((t) => t !== b.dataset.removeToy);
+      $('#toy-count').textContent = f.toys.length;
+      renderToyFilter();
+      renderActiveFilters();
+      loadLibrary(true);
+    };
+  });
+}
+
+function renderToyFilter() {
+  const panel = $('#toy-filter');
+  if (!panel) return;
+  const f = state.lib.filter;
+  panel.innerHTML = `
+    <div class="tag-filter-head">
+      <strong>Filter by toy</strong>
+      <button class="btn tiny" id="toy-clear">Clear</button>
+    </div>
+    <div class="chips">
+      ${state.toys.length
+        ? state.toys.map((t) => `<button class="chip ${f.toys.includes(t.name) ? 'active' : ''}" data-toy="${esc(t.name)}">${esc(t.name)} <span class="n">${t.count}</span></button>`).join('')
+        : '<span class="muted small">No toys yet - add them while rating videos.</span>'}
+    </div>`;
+  $$('[data-toy]', panel).forEach((btn) => {
+    btn.onclick = () => {
+      const name = btn.dataset.toy;
+      const idx = f.toys.indexOf(name);
+      if (idx >= 0) f.toys.splice(idx, 1);
+      else f.toys.push(name);
+      $('#toy-count').textContent = f.toys.length;
+      renderToyFilter();
+      renderActiveFilters();
+      loadLibrary(true);
+    };
+  });
+  $('#toy-clear', panel).onclick = () => {
+    f.toys = [];
+    $('#toy-count').textContent = '0';
+    renderToyFilter();
+    renderActiveFilters();
+    loadLibrary(true);
+  };
 }
 
 function libraryCanLoadMore() {
@@ -711,10 +776,10 @@ function renderLibraryGrid() {
   if (sub) {
     const filtered = state.lib.filter.tags.length || state.lib.filter.search || state.lib.filter.nsfw !== 'any'
       || state.lib.filter.reviewed !== 'any' || state.lib.filter.minRating || state.lib.filter.creator
-      || state.lib.filter.folder;
+      || state.lib.filter.folder || state.lib.filter.toys.length;
     sub.textContent = filtered
-      ? `${items.length} of ${total} matching videos`
-      : `${total} videos \u00b7 ${fmtSize(state.stats.totalSize || 0)}`;
+      ? `${items.length} of ${total} matching video${total === 1 ? '' : 's'}`
+      : `${total} video${total === 1 ? '' : 's'} \u00b7 ${fmtSize(state.stats.totalSize || 0)}`;
   }
   const more = $('#lib-more');
   if (more) more.style.display = items.length < total && state.lib.filter.sort !== 'random' ? '' : 'none';
@@ -739,6 +804,9 @@ function cardHtml(v) {
   const badges = FLAGS.filter(([k]) => v[k])
     .map(([k, label]) => `<span class="badge ${k === 'nsfw' ? 'nsfw' : ''}">${label}</span>`)
     .join('');
+  const toyBadges = (v.toys || [])
+    .map((t) => `<span class="badge toy">${esc(t)}</span>`)
+    .join('');
   const res = v.width ? `${v.width}\u00d7${v.height}` : '';
   const selected = state.lib.selected.has(v.id);
   return `
@@ -753,7 +821,7 @@ function cardHtml(v) {
       <div class="card-body">
         <div class="card-title" title="${esc(v.fileName)}">${esc(v.fileName)}</div>
         <div class="card-meta">${[res, fmtSize(v.size), v.creator].filter(Boolean).join(' \u00b7 ')}</div>
-        ${badges ? `<div class="badge-row">${badges}</div>` : ''}
+        ${badges || toyBadges ? `<div class="badge-row">${badges}${toyBadges}</div>` : ''}
       </div>
     </article>`;
 }
@@ -902,6 +970,11 @@ function editorHtml(v, prefix, reviewedInitial) {
       <input class="input" id="${prefix}-taginput" placeholder="Type a tag and press Enter" style="margin-top:6px">
     </div>
     <div class="field">
+      <label>Toys</label>
+      <div class="chips chips-static" id="${prefix}-toychips"></div>
+      <input class="input" id="${prefix}-toyinput" placeholder="Add a toy and press Enter" style="margin-top:6px">
+    </div>
+    <div class="field">
       <label>Notes</label>
       <textarea class="input" id="${prefix}-notes" rows="3" placeholder="Optional notes...">${esc(v.notes || '')}</textarea>
     </div>
@@ -921,6 +994,7 @@ function createEditor(root, prefix, video) {
     },
     rating: video.rating || 0,
     tags: (video.tags || []).slice(),
+    toys: (video.toys || []).slice(),
   };
 
   const renderStars = () => {
@@ -935,8 +1009,16 @@ function createEditor(root, prefix, video) {
     const wrap = $(`#${prefix}-tagchips`, root);
     if (!wrap) return;
     wrap.innerHTML = form.tags.length
-      ? form.tags.map((t, i) => `<span class="chip">${esc(t)}<button class="chip-x" data-tag-i="${i}" title="Remove">...</button></span>`).join('')
+      ? form.tags.map((t, i) => `<span class="chip">${esc(t)}<button class="chip-x" data-tag-i="${i}" title="Remove">\u00d7</button></span>`).join('')
       : '<span class="muted small">No tags</span>';
+  };
+
+  const renderToys = () => {
+    const wrap = $(`#${prefix}-toychips`, root);
+    if (!wrap) return;
+    wrap.innerHTML = form.toys.length
+      ? form.toys.map((t, i) => `<span class="chip toy">${esc(t)}<button class="chip-x" data-toy-i="${i}" title="Remove">\u00d7</button></span>`).join('')
+      : '<span class="muted small">No toys</span>';
   };
 
   $$('[data-flag]', root).forEach((btn) => {
@@ -1000,6 +1082,45 @@ function createEditor(root, prefix, video) {
     }
   });
 
+  const toyInput = $(`#${prefix}-toyinput`, root);
+  const addToy = (raw) => {
+    const name = String(raw || '').trim().replace(/,+$/, '');
+    if (!name) return;
+    if (!form.toys.some((t) => t.toLowerCase() === name.toLowerCase())) {
+      form.toys.push(name);
+      renderToys();
+    }
+    toyInput.value = '';
+  };
+  attachAutocomplete(toyInput, (query) => {
+    const q = query.toLowerCase();
+    const taken = new Set(form.toys.map((t) => t.toLowerCase()));
+    const matches = state.toys
+      .filter((t) => !taken.has(t.name.toLowerCase()) && (!q || t.name.toLowerCase().includes(q)))
+      .sort((a, b) => {
+        const as = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const bs = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        if (as !== bs) return as - bs;
+        if (b.count !== a.count) return b.count - a.count;
+        return a.name.localeCompare(b.name);
+      })
+      .map((t) => ({ value: t.name, meta: t.count }));
+    if (q && !state.toys.some((t) => t.name.toLowerCase() === q) && !taken.has(q)) {
+      matches.unshift({ value: query, meta: 'new', create: true });
+    }
+    return matches;
+  }, { onPick: addToy });
+  toyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      e.stopPropagation();
+      addToy(toyInput.value);
+    } else if (e.key === 'Backspace' && !toyInput.value && form.toys.length) {
+      form.toys.pop();
+      renderToys();
+    }
+  });
+
   const creatorInput = $(`#${prefix}-creator`, root);
   attachAutocomplete(creatorInput, (query) => {
     const q = query.toLowerCase();
@@ -1019,10 +1140,16 @@ function createEditor(root, prefix, video) {
       form.tags.splice(Number(btn.dataset.tagI), 1);
       renderTags();
     }
+    const toyBtn = e.target.closest('[data-toy-i]');
+    if (toyBtn) {
+      form.toys.splice(Number(toyBtn.dataset.toyI), 1);
+      renderToys();
+    }
   });
 
   renderStars();
   renderTags();
+  renderToys();
 
   return {
     form,
@@ -1038,6 +1165,7 @@ function createEditor(root, prefix, video) {
         inflation: form.flags.inflation,
         rating: form.rating,
         tags: form.tags.slice(),
+        toys: form.toys.slice(),
         reviewed: reviewedEl ? reviewedEl.checked : undefined,
       };
     },
@@ -1995,6 +2123,22 @@ function viewSettings() {
       </section>
 
       <section class="panel">
+        <h2>Toys</h2>
+        <div class="tag-manager">
+          ${state.toys.length
+            ? state.toys.map((t) => `
+              <div class="toy-row" data-toy="${esc(t.name)}">
+                <span class="tag-name ellipsis">${esc(t.name)}</span>
+                <span class="muted small">${t.count}</span>
+                <button class="btn tiny" data-toy-rename>Rename</button>
+                <button class="btn tiny danger" data-toy-delete>Delete</button>
+              </div>`).join('')
+            : '<p class="muted small">No toys yet.</p>'}
+        </div>
+        <p class="muted small">Toys are a separate field from tags, so you can filter by the inflatable (dolphin, orca, pool...) on its own. Renaming into an existing name merges them.</p>
+      </section>
+
+      <section class="panel">
         <h2>Data</h2>
         <div class="row gap" style="flex-wrap:wrap">
           <button class="btn" id="set-backup">Back up database...</button>
@@ -2219,6 +2363,45 @@ function viewSettings() {
     }
   });
 
+  $$('.toy-row').forEach((row) => {
+    const name = row.dataset.toy;
+    const rename = $('[data-toy-rename]', row);
+    if (rename) {
+      rename.onclick = async () => {
+        const next = await promptDialog('Rename toy', 'New name (existing name merges)', name);
+        if (!next || next === name) return;
+        try {
+          await invoke('rename_toy', { old: name, new: next });
+          toast('Toy renamed.');
+          await refreshMeta();
+          viewSettings();
+        } catch (err) {
+          toast(String(err), 'error');
+        }
+      };
+    }
+    const remove = $('[data-toy-delete]', row);
+    if (remove) {
+      remove.onclick = async () => {
+        const ok = await confirmDialog({
+          title: `Delete toy "${name}"?`,
+          message: 'The toy is removed from every video.',
+          okLabel: 'Delete toy',
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await invoke('delete_toy', { name });
+          toast('Toy deleted.');
+          await refreshMeta();
+          viewSettings();
+        } catch (err) {
+          toast(String(err), 'error');
+        }
+      };
+    }
+  });
+
   $('#set-backup').onclick = async () => {
     try {
       const path = await invoke('backup_database');
@@ -2340,5 +2523,6 @@ document.addEventListener('keydown', (e) => {
   const flagKeys = { n: 'nsfw', p: 'popping', d: 'destruction', f: 'deflation', i: 'inflation' };
   if (flagKeys[key]) { e.preventDefault(); state.rate.editor.toggleFlag(flagKeys[key]); }
 });
+
 
 

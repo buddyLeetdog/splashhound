@@ -28,6 +28,7 @@ pub struct Bootstrap {
     pub cache_limit_mb: u64,
     pub stats: db::Stats,
     pub tags: Vec<db::TagCount>,
+    pub toys: Vec<db::TagCount>,
     pub creators: Vec<String>,
     pub scan: ScanStatus,
     pub version: String,
@@ -38,11 +39,12 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
     let st = state.inner().clone();
     let root = st.root_path();
     let ff = st.ffmpeg();
-    let (stats, tags, creators, hash_mode) = {
+    let (stats, tags, toys, creators, hash_mode) = {
         let conn = st.db.lock().map_err(err)?;
         (
             db::stats(&conn).map_err(err)?,
             db::all_tags(&conn).map_err(err)?,
+            db::all_toys(&conn).map_err(err)?,
             db::creators(&conn).map_err(err)?,
             db::hash_mode(&conn),
         )
@@ -75,6 +77,7 @@ pub async fn bootstrap(state: State<'_, Arc<AppState>>) -> Result<Bootstrap, Str
             .unwrap_or(4096),
         stats,
         tags,
+        toys,
         creators,
         scan: scan_state,
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -242,6 +245,7 @@ pub async fn remove_duplicate(state: State<'_, Arc<AppState>>, id: i64) -> Resul
             "rating": video.rating,
             "reviewed": video.reviewed,
             "tags": video.tags,
+            "toys": video.toys,
         });
         let meta_json = serde_json::to_string(&meta).ok();
         let _ = db::trash_add(
@@ -407,6 +411,28 @@ pub async fn ensure_thumbs(
 pub async fn all_tags(state: State<'_, Arc<AppState>>) -> Result<Vec<db::TagCount>, String> {
     let conn = state.inner().db.lock().map_err(err)?;
     db::all_tags(&conn).map_err(err)
+}
+
+#[tauri::command]
+pub async fn all_toys(state: State<'_, Arc<AppState>>) -> Result<Vec<db::TagCount>, String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::all_toys(&conn).map_err(err)
+}
+
+#[tauri::command]
+pub async fn rename_toy(
+    state: State<'_, Arc<AppState>>,
+    old: String,
+    new: String,
+) -> Result<(), String> {
+    let mut conn = state.inner().db.lock().map_err(err)?;
+    db::rename_toy(&mut conn, &old, &new).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn delete_toy(state: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
+    let mut conn = state.inner().db.lock().map_err(err)?;
+    db::delete_toy(&mut conn, &name).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -716,6 +742,11 @@ pub async fn restore_trash(state: State<'_, Arc<AppState>>, id: i64) -> Result<S
                             .filter_map(|t| t.as_str().map(str::to_string))
                             .collect()
                     }),
+                    toys: value.get("toys").and_then(|v| v.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    }),
                 };
                 let _ = db::save_video(&mut conn, upsert.id, &patch);
             }
@@ -835,6 +866,8 @@ struct ExportVideo {
     reviewed: bool,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    toys: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -893,6 +926,7 @@ pub async fn export_library(state: State<'_, Arc<AppState>>) -> Result<Option<St
                 rating: v.rating,
                 reviewed: v.reviewed,
                 tags: v.tags.clone(),
+                toys: v.toys.clone(),
             })
             .collect(),
     };
@@ -965,6 +999,7 @@ pub async fn import_library(
             rating: Some(item.rating),
             reviewed: Some(item.reviewed),
             tags: Some(item.tags.clone()),
+            toys: Some(item.toys.clone()),
         };
         if db::save_video(&mut conn, id, &patch).is_ok() {
             matched += 1;

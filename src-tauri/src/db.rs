@@ -59,6 +59,19 @@ CREATE TABLE IF NOT EXISTS video_tags (
   PRIMARY KEY (video_id, tag_id)
 );
 
+CREATE TABLE IF NOT EXISTS toys (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_toys_name ON toys(name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS video_toys (
+  video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  toy_id   INTEGER NOT NULL REFERENCES toys(id) ON DELETE CASCADE,
+  PRIMARY KEY (video_id, toy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vtoy_toy ON video_toys(toy_id, video_id);
+
 CREATE TABLE IF NOT EXISTS trash (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   original_path TEXT NOT NULL,
@@ -119,6 +132,7 @@ pub struct VideoDto {
     pub added_at: i64,
     pub missing: bool,
     pub tags: Vec<String>,
+    pub toys: Vec<String>,
     pub playback: String,
 }
 
@@ -167,6 +181,7 @@ pub fn video_from_row(r: &Row<'_>) -> rusqlite::Result<VideoDto> {
         added_at: r.get(23)?,
         missing: b(r.get(24)?),
         tags: Vec::new(),
+        toys: Vec::new(),
         playback: crate::media::playback_str(
             &r.get::<_, String>(3)?,
             vcodec.as_deref(),
@@ -288,6 +303,26 @@ pub fn attach_tags(conn: &Connection, items: &mut [VideoDto]) -> Result<()> {
     for v in items.iter_mut() {
         v.tags = map.remove(&v.id).unwrap_or_default();
     }
+
+    let toy_sql = format!(
+        "SELECT vt.video_id, t.name FROM video_toys vt
+         JOIN toys t ON t.id = vt.toy_id
+         WHERE vt.video_id IN ({})
+         ORDER BY t.name COLLATE NOCASE",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&toy_sql)?;
+    let mut toy_map: HashMap<i64, Vec<String>> = HashMap::new();
+    let rows = stmt.query_map(params_from_iter(ids.iter()), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (vid, name) = row?;
+        toy_map.entry(vid).or_default().push(name);
+    }
+    for v in items.iter_mut() {
+        v.toys = toy_map.remove(&v.id).unwrap_or_default();
+    }
     Ok(())
 }
 
@@ -308,6 +343,7 @@ pub struct VideoFilter {
     pub search: Option<String>,
     pub tags: Vec<String>,
     pub tag_mode: String,
+    pub toys: Vec<String>,
     pub nsfw: String,
     pub reviewed: String,
     pub min_rating: i64,
@@ -327,10 +363,12 @@ fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
         clauses.push(
             "(v.file_name LIKE ? COLLATE NOCASE OR v.path LIKE ? COLLATE NOCASE \
               OR COALESCE(v.creator,'') LIKE ? COLLATE NOCASE \
-              OR COALESCE(v.notes,'') LIKE ? COLLATE NOCASE)"
+              OR COALESCE(v.notes,'') LIKE ? COLLATE NOCASE \
+              OR EXISTS (SELECT 1 FROM video_toys vt JOIN toys t ON t.id = vt.toy_id
+                         WHERE vt.video_id = v.id AND t.name LIKE ? COLLATE NOCASE))"
                 .into(),
         );
-        for _ in 0..4 {
+        for _ in 0..5 {
             vals.push(SqlValue::Text(like.clone()));
         }
     }
@@ -358,6 +396,21 @@ fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
             for t in &f.tags {
                 vals.push(SqlValue::Text(t.clone()));
             }
+        }
+    }
+
+    if !f.toys.is_empty() {
+        let placeholders = std::iter::repeat("?")
+            .take(f.toys.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM video_toys vt JOIN toys t ON t.id = vt.toy_id
+                     WHERE vt.video_id = v.id AND t.name COLLATE NOCASE IN ({}))",
+            placeholders
+        ));
+        for t in &f.toys {
+            vals.push(SqlValue::Text(t.clone()));
         }
     }
 
@@ -603,6 +656,71 @@ pub fn all_tags(conn: &Connection) -> Result<Vec<TagCount>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+pub fn all_toys(conn: &Connection) -> Result<Vec<TagCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.name, COUNT(v.id)
+         FROM toys t
+         LEFT JOIN video_toys vt ON vt.toy_id = t.id
+         LEFT JOIN videos v ON v.id = vt.video_id AND v.missing = 0
+         GROUP BY t.id
+         ORDER BY t.name COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(TagCount {
+            name: r.get(0)?,
+            count: r.get(1)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Rename a toy; if the new name exists this merges the two.
+pub fn rename_toy(conn: &mut Connection, old: &str, new: &str) -> Result<()> {
+    let new = new.trim();
+    if new.is_empty() {
+        return Err(anyhow!("Toy name cannot be empty."));
+    }
+    let old_id: i64 = conn.query_row(
+        "SELECT id FROM toys WHERE name = ?1 COLLATE NOCASE",
+        params![old],
+        |r| r.get(0),
+    )?;
+    let tx = conn.transaction()?;
+    tx.execute("INSERT OR IGNORE INTO toys(name) VALUES (?1)", params![new])?;
+    let new_id: i64 = tx.query_row(
+        "SELECT id FROM toys WHERE name = ?1 COLLATE NOCASE",
+        params![new],
+        |r| r.get(0),
+    )?;
+    if new_id != old_id {
+        tx.execute(
+            "UPDATE OR IGNORE video_toys SET toy_id = ?1 WHERE toy_id = ?2",
+            params![new_id, old_id],
+        )?;
+        tx.execute("DELETE FROM video_toys WHERE toy_id = ?1", params![old_id])?;
+        tx.execute("DELETE FROM toys WHERE id = ?1", params![old_id])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn delete_toy(conn: &mut Connection, name: &str) -> Result<()> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM toys WHERE name = ?1 COLLATE NOCASE",
+            params![name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM video_toys WHERE toy_id = ?1", params![id])?;
+        tx.execute("DELETE FROM toys WHERE id = ?1", params![id])?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 pub fn creators(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT creator FROM videos
@@ -628,6 +746,7 @@ pub struct VideoPatch {
     pub rating: Option<i64>,
     pub reviewed: Option<bool>,
     pub tags: Option<Vec<String>>,
+    pub toys: Option<Vec<String>>,
 }
 
 impl Default for VideoPatch {
@@ -643,6 +762,7 @@ impl Default for VideoPatch {
             rating: None,
             reviewed: None,
             tags: None,
+            toys: None,
         }
     }
 }
@@ -716,6 +836,34 @@ pub fn save_video(conn: &mut Connection, id: i64, p: &VideoPatch) -> Result<Vide
         }
         conn.execute(
             "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM video_tags)",
+            [],
+        )?;
+    }
+
+    if let Some(toys) = &p.toys {
+        conn.execute("DELETE FROM video_toys WHERE video_id = ?1", params![id])?;
+        let mut seen: HashSet<String> = HashSet::new();
+        for raw in toys {
+            let name = raw.trim();
+            if name.is_empty() || !seen.insert(name.to_lowercase()) {
+                continue;
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO toys(name) VALUES (?1)",
+                params![name],
+            )?;
+            let toy_id: i64 = conn.query_row(
+                "SELECT id FROM toys WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |r| r.get(0),
+            )?;
+            conn.execute(
+                "INSERT OR IGNORE INTO video_toys(video_id, toy_id) VALUES (?1, ?2)",
+                params![id, toy_id],
+            )?;
+        }
+        conn.execute(
+            "DELETE FROM toys WHERE id NOT IN (SELECT toy_id FROM video_toys)",
             [],
         )?;
     }
@@ -1014,6 +1162,8 @@ pub struct BulkEdit {
     pub inflation: Option<bool>,
     pub add_tags: Vec<String>,
     pub remove_tags: Vec<String>,
+    pub add_toys: Vec<String>,
+    pub remove_toys: Vec<String>,
 }
 
 pub fn bulk_update(conn: &mut Connection, edit: &BulkEdit) -> Result<usize> {
@@ -1111,6 +1261,58 @@ pub fn bulk_update(conn: &mut Connection, edit: &BulkEdit) -> Result<usize> {
     }
     tx.execute(
         "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM video_tags)",
+        [],
+    )?;
+
+    for raw in edit.add_toys.iter().chain(edit.remove_toys.iter()) {
+        let name = raw.trim();
+        if !name.is_empty() {
+            tx.execute(
+                "INSERT OR IGNORE INTO toys(name) VALUES (?1)",
+                params![name],
+            )?;
+        }
+    }
+    for raw in &edit.add_toys {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let toy_id: i64 = tx.query_row(
+            "SELECT id FROM toys WHERE name = ?1 COLLATE NOCASE",
+            params![name],
+            |r| r.get(0),
+        )?;
+        for id in &edit.ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO video_toys(video_id, toy_id) VALUES (?1, ?2)",
+                params![id, toy_id],
+            )?;
+        }
+    }
+    for raw in &edit.remove_toys {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let toy_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM toys WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(toy_id) = toy_id {
+            for id in &edit.ids {
+                tx.execute(
+                    "DELETE FROM video_toys WHERE video_id = ?1 AND toy_id = ?2",
+                    params![id, toy_id],
+                )?;
+            }
+        }
+    }
+    tx.execute(
+        "DELETE FROM toys WHERE id NOT IN (SELECT toy_id FROM video_toys)",
         [],
     )?;
     tx.commit()?;
