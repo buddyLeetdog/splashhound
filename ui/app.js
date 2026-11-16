@@ -2340,6 +2340,11 @@ function viewSettings() {
           computes MD5 hashes for duplicate detection and marks deleted files as missing.
           New videos appear in the Rate queue.
         </p>
+        <p class="muted small">
+          Moved the collection to another disk? Choose the new folder: if its contents
+          match the indexed layout, entries are re-linked automatically and keep their
+          tags, ratings and toys.
+        </p>
       </section>
 
       <section class="panel">
@@ -2433,6 +2438,9 @@ function viewSettings() {
           <button class="btn" id="set-backup">Back up database...</button>
           <button class="btn" id="set-export">Export metadata...</button>
           <button class="btn" id="set-import">Import metadata...</button>
+          ${state.stats.missing
+            ? `<button class="btn danger" id="set-purge">Remove ${state.stats.missing} missing entr${state.stats.missing === 1 ? 'y' : 'ies'}</button>`
+            : ''}
         </div>
         <p class="muted small">Export writes tags, ratings and flags for every video as JSON; import matches entries back by MD5 hash, then by path.</p>
       </section>
@@ -2472,10 +2480,16 @@ function viewSettings() {
     try {
       const path = await invoke('pick_folder');
       if (!path) return;
-      const saved = await invoke('set_root', { path });
-      state.boot.root = saved;
-      state.boot.trashDir = `${saved}\\_trash`;
-      toast('Library folder set.');
+      const res = await invoke('set_root', { path });
+      state.boot.root = res.root;
+      state.boot.trashDir = `${res.root}\\_trash`;
+      if (res.relinked) {
+        toast(`Library folder set - re-linked ${res.relinked} existing entries with their tags and ratings.`);
+      } else if (res.switched) {
+        toast('Library folder switched. Entries from the previous folder are kept but hidden.');
+      } else {
+        toast('Library folder set.');
+      }
       startScan();
       viewSettings();
     } catch (err) {
@@ -2690,6 +2704,28 @@ function viewSettings() {
       };
     }
   });
+
+  const purgeBtn = $('#set-purge');
+  if (purgeBtn) {
+    purgeBtn.onclick = async () => {
+      const count = state.stats.missing || 0;
+      const ok = await confirmDialog({
+        title: `Remove ${count} missing entr${count === 1 ? 'y' : 'ies'}?`,
+        message: 'Rows whose files no longer exist are removed, together with their tags and ratings. The files on disk are not touched.',
+        okLabel: 'Remove entries',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        const removed = await invoke('purge_missing');
+        toast(`Removed ${removed} missing entr${removed === 1 ? 'y' : 'ies'}.`);
+        await refreshMeta();
+        viewSettings();
+      } catch (err) {
+        toast(String(err), 'error');
+      }
+    };
+  }
 
   $('#set-backup').onclick = async () => {
     try {

@@ -96,18 +96,71 @@ pub async fn pick_folder() -> Result<Option<String>, String> {
     Ok(picked.map(|p| p.to_string_lossy().to_string()))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootInfo {
+    pub root: String,
+    pub relinked: usize,
+    pub switched: bool,
+}
+
 #[tauri::command]
-pub async fn set_root(state: State<'_, Arc<AppState>>, path: String) -> Result<String, String> {
+pub async fn set_root(state: State<'_, Arc<AppState>>, path: String) -> Result<RootInfo, String> {
     let st = state.inner().clone();
     let canonical =
         std::fs::canonicalize(&path).map_err(|_| format!("Folder not found: {path}"))?;
     if !canonical.is_dir() {
         return Err("That path is not a folder.".into());
     }
-    let stored = db::display_path(&canonical.to_string_lossy());
-    st.set_setting("root", &stored)?;
-    *st.root.write().unwrap() = Some(PathBuf::from(&stored));
-    Ok(stored)
+    let new_root = db::display_path(&canonical.to_string_lossy());
+    let old_root = st.setting("root").unwrap_or_default();
+
+    let (relinked, switched) = {
+        let mut conn = st.db.lock().map_err(err)?;
+        if !old_root.is_empty() {
+            let _ = db::backfill_rel_paths(&conn, &old_root);
+        }
+        let same_as_before = !old_root.is_empty() && old_root.eq_ignore_ascii_case(&new_root);
+        if same_as_before {
+            let _ = db::backfill_rel_paths(&conn, &new_root);
+            (0, false)
+        } else {
+            // Only re-link when the chosen folder looks like the same
+            // collection: a sample of the stored relative paths must exist.
+            let sample: Vec<String> = {
+                let mut stmt = conn
+                    .prepare("SELECT rel_path FROM videos WHERE rel_path IS NOT NULL LIMIT 50")
+                    .map_err(err)?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(err)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(err)?;
+                rows
+            };
+            let present = sample
+                .iter()
+                .filter(|rel| Path::new(&new_root).join(rel.as_str()).is_file())
+                .count();
+            let same_collection = !sample.is_empty() && present * 2 >= sample.len();
+            if same_collection {
+                let moved = db::repath_library(&mut conn, &new_root).map_err(err)?;
+                let _ = db::repath_trash(&mut conn, &old_root, &new_root);
+                let _ = db::backfill_rel_paths(&conn, &new_root);
+                (moved, false)
+            } else {
+                (0, !old_root.is_empty())
+            }
+        }
+    };
+
+    st.set_setting("root", &new_root)?;
+    *st.root.write().unwrap() = Some(PathBuf::from(&new_root));
+    Ok(RootInfo {
+        root: new_root,
+        relinked,
+        switched,
+    })
 }
 
 #[tauri::command]
@@ -728,8 +781,20 @@ pub async fn restore_trash(state: State<'_, Arc<AppState>>, id: i64) -> Result<S
 
     let new_id = {
         let mut conn = st.db.lock().map_err(err)?;
-        let upsert = db::upsert_file(&conn, &path_str, &file_name, &ext, size, mtime, scan::now())
-            .map_err(err)?;
+        let rel = st
+            .root_path()
+            .and_then(|root| db::relative_to(&path_str, &root.to_string_lossy()));
+        let upsert = db::upsert_file(
+            &conn,
+            &path_str,
+            rel.as_deref(),
+            &file_name,
+            &ext,
+            size,
+            mtime,
+            scan::now(),
+        )
+        .map_err(err)?;
         if let Some(json) = &entry.meta_json {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
                 let patch = db::VideoPatch {
@@ -794,6 +859,12 @@ pub async fn delete_trash(state: State<'_, Arc<AppState>>, id: i64) -> Result<()
 }
 
 /* --------------------------- indexing options --------------------------- */
+
+#[tauri::command]
+pub async fn purge_missing(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::purge_missing(&conn).map_err(err)
+}
 
 #[tauri::command]
 pub async fn set_hash_mode(state: State<'_, Arc<AppState>>, mode: String) -> Result<(), String> {

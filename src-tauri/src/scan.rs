@@ -180,6 +180,7 @@ pub async fn run_scan(state: Arc<AppState>) {
 
         // 2. Insert / update rows ------------------------------------------
         let now_ts = now();
+        let root_str = root.to_string_lossy().to_string();
         let mut seen: HashSet<String> = HashSet::with_capacity(files.len());
         let mut added = 0usize;
         let mut updated = 0usize;
@@ -191,9 +192,11 @@ pub async fn run_scan(state: Arc<AppState>) {
             seen.insert(f.path.clone());
             let res = {
                 let conn = state.db.lock().map_err(|e| anyhow!(e.to_string()))?;
+                let rel = db::relative_to(&f.path, &root_str);
                 db::upsert_file(
                     &conn,
                     &f.path,
+                    rel.as_deref(),
                     &f.file_name,
                     &f.ext,
                     f.size,

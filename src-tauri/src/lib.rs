@@ -234,7 +234,13 @@ pub fn run() {
             if let Err(err) = db::normalize_stored_paths(&conn) {
                 eprintln!("could not normalize stored paths: {err}");
             }
-            let root = db::get_setting(&conn, "root")
+            let stored_root = db::get_setting(&conn, "root");
+            if let Some(stored) = stored_root.as_deref() {
+                if let Err(err) = db::backfill_rel_paths(&conn, stored) {
+                    eprintln!("could not backfill relative paths: {err}");
+                }
+            }
+            let root = stored_root
                 .map(PathBuf::from)
                 .filter(|p| p.is_dir());
             let state = Arc::new(AppState::new(
@@ -299,6 +305,7 @@ pub fn run() {
             commands::restore_trash,
             commands::delete_trash,
             commands::set_hash_mode,
+            commands::purge_missing,
             commands::set_cache_limit,
             commands::clean_cache,
             commands::start_dna,

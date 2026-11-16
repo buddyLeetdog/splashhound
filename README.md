@@ -102,6 +102,12 @@ height, video/audio codec, has-audio, MD5, creator, NSFW, popping, destruction,
 deflation, inflation, notes, rating (0–5), reviewed, view count, last viewed,
 date added, missing.
 
+Each row also stores its path relative to the library root. If you move the
+collection to another disk, choose the new folder in Settings: when the
+relative layout matches, all entries are re-linked in place and keep their
+tags, ratings and toys. Files that no longer exist are flagged as missing;
+**Settings → Data → Remove missing entries** clears those rows.
+
 Tags live in a separate `tags` table with a `video_tags` join table, so the
 "other tags" field is a proper many-to-many tag set. Toys use their own
 `toys` / `video_toys` tables, so the inflatable shown in a video can be tagged

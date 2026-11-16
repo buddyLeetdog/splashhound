@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS videos (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   path        TEXT NOT NULL UNIQUE,
+  rel_path    TEXT,
   file_name   TEXT NOT NULL,
   ext         TEXT NOT NULL DEFAULT '',
   size        INTEGER NOT NULL DEFAULT 0,
@@ -199,6 +200,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.busy_timeout(std::time::Duration::from_secs(15))?;
     conn.execute_batch(SCHEMA)?;
     ensure_column(&conn, "videos", "hash_state", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(&conn, "videos", "rel_path", "TEXT")?;
     Ok(conn)
 }
 
@@ -220,6 +222,105 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
     }
     Ok(())
+}
+
+/// Strip the library root from an absolute path, returning the portable part.
+pub fn relative_to(path: &str, root: &str) -> Option<String> {
+    let root = root.trim_end_matches(['\\', '/']);
+    if root.is_empty() {
+        return None;
+    }
+    let prefix = format!("{root}\\");
+    if path.len() <= prefix.len() {
+        return None;
+    }
+    if path.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes()) {
+        Some(path[prefix.len()..].to_string())
+    } else {
+        None
+    }
+}
+
+/// Fill in `rel_path` for rows stored under `root` (migration + first scan).
+pub fn backfill_rel_paths(conn: &Connection, root: &str) -> Result<usize> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, path FROM videos WHERE rel_path IS NULL")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    let mut filled = 0;
+    for (id, path) in rows {
+        if let Some(rel) = relative_to(&path, root) {
+            conn.execute(
+                "UPDATE videos SET rel_path = ?2 WHERE id = ?1",
+                params![id, rel],
+            )?;
+            filled += 1;
+        }
+    }
+    Ok(filled)
+}
+
+/// Rewrite every absolute path to the new root, keeping ids/tags/ratings.
+pub fn repath_library(conn: &mut Connection, new_root: &str) -> Result<usize> {
+    let root = new_root.trim_end_matches(['\\', '/']).to_string();
+    let rows: Vec<(i64, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, rel_path FROM videos WHERE rel_path IS NOT NULL")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    let tx = conn.transaction()?;
+    let mut moved = 0;
+    for (id, rel) in rows {
+        let new_path = format!("{root}\\{rel}");
+        if tx.execute(
+            "UPDATE OR IGNORE videos SET path = ?1 WHERE id = ?2",
+            params![new_path, id],
+        )? > 0
+        {
+            moved += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(moved)
+}
+
+/// Move trash entries' original locations to the new root too.
+pub fn repath_trash(conn: &mut Connection, old_root: &str, new_root: &str) -> Result<usize> {
+    let root = new_root.trim_end_matches(['\\', '/']).to_string();
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, original_path FROM trash")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    let tx = conn.transaction()?;
+    let mut moved = 0;
+    for (id, path) in rows {
+        if let Some(rel) = relative_to(&path, old_root) {
+            tx.execute(
+                "UPDATE trash SET original_path = ?1 WHERE id = ?2",
+                params![format!("{root}\\{rel}"), id],
+            )?;
+            moved += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(moved)
+}
+
+/// Remove rows flagged as missing (files deleted or from an old root).
+pub fn purge_missing(conn: &Connection) -> Result<usize> {
+    let removed = conn.execute("DELETE FROM videos WHERE missing = 1", [])?;
+    conn.execute(
+        "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM video_tags)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM toys WHERE id NOT IN (SELECT toy_id FROM video_toys)",
+        [],
+    )?;
+    Ok(removed)
 }
 
 /// Strip the Windows verbatim prefix (`\\?\`) so paths read normally in the UI.
@@ -881,6 +982,7 @@ pub struct Upsert {
 pub fn upsert_file(
     conn: &Connection,
     path: &str,
+    rel_path: Option<&str>,
     file_name: &str,
     ext: &str,
     size: i64,
@@ -900,16 +1002,17 @@ pub fn upsert_file(
             let changed = old_size != size || old_mtime != mtime;
             if changed {
                 conn.execute(
-                    "UPDATE videos SET size = ?2, mtime = ?3, duration_ms = NULL, width = NULL,
+                    "UPDATE videos SET size = ?2, mtime = ?3, rel_path = ?4, duration_ms = NULL, width = NULL,
                         height = NULL, vcodec = NULL, acodec = NULL, has_audio = 0, md5 = NULL,
                         hash_state = 0, missing = 0
                      WHERE id = ?1",
-                    params![id, size, mtime],
+                    params![id, size, mtime, rel_path],
                 )?;
             } else {
                 conn.execute(
-                    "UPDATE videos SET missing = 0 WHERE id = ?1 AND missing <> 0",
-                    params![id],
+                    "UPDATE videos SET missing = 0, rel_path = COALESCE(?2, rel_path)
+                     WHERE id = ?1",
+                    params![id, rel_path],
                 )?;
             }
             Ok(Upsert {
@@ -920,9 +1023,9 @@ pub fn upsert_file(
         }
         None => {
             conn.execute(
-                "INSERT INTO videos(path, file_name, ext, size, mtime, added_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![path, file_name, ext, size, mtime, now],
+                "INSERT INTO videos(path, rel_path, file_name, ext, size, mtime, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![path, rel_path, file_name, ext, size, mtime, now],
             )?;
             Ok(Upsert {
                 id: conn.last_insert_rowid(),
@@ -1594,4 +1697,86 @@ pub fn similar_groups(conn: &Connection) -> Result<Vec<SimilarGroup>> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn
+    }
+
+    #[test]
+    fn relative_to_strips_root() {
+        assert_eq!(
+            relative_to(r"D:\Lib\a\b.mp4", r"D:\Lib"),
+            Some(r"a\b.mp4".to_string())
+        );
+        assert_eq!(relative_to(r"D:\Library\a.mp4", r"D:\Lib"), None);
+        assert_eq!(
+            relative_to(r"D:\Lib\a.mp4", r"D:\Lib\"),
+            Some("a.mp4".to_string())
+        );
+        assert_eq!(relative_to(r"D:\Lib\a.mp4", ""), None);
+    }
+
+    #[test]
+    fn repath_keeps_tags() {
+        let mut conn = test_conn();
+        conn.execute(
+            "INSERT INTO videos(path, file_name, added_at) VALUES (?1, ?2, ?3)",
+            params![r"D:\Old\a.mp4", "a.mp4", 1],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        conn.execute("INSERT INTO tags(name) VALUES ('x')", [])
+            .unwrap();
+        let tag_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO video_tags(video_id, tag_id) VALUES (?1, ?2)",
+            params![id, tag_id],
+        )
+        .unwrap();
+
+        assert_eq!(backfill_rel_paths(&conn, r"D:\Old").unwrap(), 1);
+        assert_eq!(repath_library(&mut conn, r"E:\New").unwrap(), 1);
+
+        let path: String = conn
+            .query_row("SELECT path FROM videos WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(path, r"E:\New\a.mp4");
+        let tags: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM video_tags WHERE video_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tags, 1);
+    }
+
+    #[test]
+    fn purge_removes_only_missing() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO videos(path, file_name, missing) VALUES ('a', 'a', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO videos(path, file_name, missing) VALUES ('b', 'b', 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(purge_missing(&conn).unwrap(), 1);
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM videos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1);
+    }
 }
