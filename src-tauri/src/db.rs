@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row};
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row,
+};
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA: &str = r#"
@@ -164,9 +166,11 @@ pub fn open(path: &Path) -> Result<Connection> {
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| {
-        r.get(0)
-    })
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |r| r.get(0),
+    )
     .optional()
     .ok()
     .flatten()
@@ -186,7 +190,10 @@ pub fn attach_tags(conn: &Connection, items: &mut [VideoDto]) -> Result<()> {
         return Ok(());
     }
     let ids: Vec<i64> = items.iter().map(|v| v.id).collect();
-    let placeholders = std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(",");
+    let placeholders = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT vt.video_id, t.name FROM video_tags vt
          JOIN tags t ON t.id = vt.tag_id
@@ -211,7 +218,9 @@ pub fn attach_tags(conn: &Connection, items: &mut [VideoDto]) -> Result<()> {
 
 pub fn get_video(conn: &Connection, id: i64) -> Result<Option<VideoDto>> {
     let sql = format!("SELECT {} FROM videos v WHERE v.id = ?1", VIDEO_COLS);
-    let mut v = conn.query_row(&sql, params![id], video_from_row).optional()?;
+    let mut v = conn
+        .query_row(&sql, params![id], video_from_row)
+        .optional()?;
     if let Some(v) = v.as_mut() {
         attach_tags(conn, std::slice::from_mut(v))?;
     }
@@ -237,12 +246,7 @@ fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
     let mut clauses: Vec<String> = vec!["v.missing = 0".into()];
     let mut vals: Vec<SqlValue> = Vec::new();
 
-    if let Some(s) = f
-        .search
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(s) = f.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let like = format!("%{}%", s);
         clauses.push(
             "(v.file_name LIKE ? COLLATE NOCASE OR v.path LIKE ? COLLATE NOCASE \
@@ -266,7 +270,10 @@ fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
                 vals.push(SqlValue::Text(t.clone()));
             }
         } else {
-            let placeholders = std::iter::repeat("?").take(f.tags.len()).collect::<Vec<_>>().join(",");
+            let placeholders = std::iter::repeat("?")
+                .take(f.tags.len())
+                .collect::<Vec<_>>()
+                .join(",");
             clauses.push(format!(
                 "EXISTS (SELECT 1 FROM video_tags vt JOIN tags t ON t.id = vt.tag_id
                          WHERE vt.video_id = v.id AND t.name COLLATE NOCASE IN ({}))",
@@ -448,7 +455,9 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
         [],
         |r| r.get(0),
     )?;
-    s.missing = conn.query_row("SELECT COUNT(*) FROM videos WHERE missing = 1", [], |r| r.get(0))?;
+    s.missing = conn.query_row("SELECT COUNT(*) FROM videos WHERE missing = 1", [], |r| {
+        r.get(0)
+    })?;
     Ok(s)
 }
 
@@ -574,7 +583,10 @@ pub fn save_video(conn: &mut Connection, id: i64, p: &VideoPatch) -> Result<Vide
             if name.is_empty() || !seen.insert(name.to_lowercase()) {
                 continue;
             }
-            conn.execute("INSERT OR IGNORE INTO tags(name) VALUES (?1)", params![name])?;
+            conn.execute(
+                "INSERT OR IGNORE INTO tags(name) VALUES (?1)",
+                params![name],
+            )?;
             let tag_id: i64 = conn.query_row(
                 "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
                 params![name],
@@ -712,7 +724,10 @@ pub fn set_metadata(conn: &Connection, id: i64, p: &crate::media::ProbeInfo) -> 
 }
 
 pub fn mark_probe_failed(conn: &Connection, id: i64) -> Result<()> {
-    conn.execute("UPDATE videos SET duration_ms = -1 WHERE id = ?1", params![id])?;
+    conn.execute(
+        "UPDATE videos SET duration_ms = -1 WHERE id = ?1",
+        params![id],
+    )?;
     Ok(())
 }
 
@@ -726,13 +741,20 @@ pub fn mark_viewed(conn: &Connection, id: i64, now: i64) -> Result<i64> {
         "UPDATE videos SET view_count = view_count + 1, last_viewed = ?2 WHERE id = ?1",
         params![id, now],
     )?;
-    let count = conn.query_row("SELECT view_count FROM videos WHERE id = ?1", params![id], |r| r.get(0))?;
+    let count = conn.query_row(
+        "SELECT view_count FROM videos WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )?;
     Ok(count)
 }
 
 pub fn delete_video(conn: &mut Connection, id: i64) -> Result<()> {
     conn.execute("DELETE FROM video_tags WHERE video_id = ?1", params![id])?;
     conn.execute("DELETE FROM videos WHERE id = ?1", params![id])?;
-    conn.execute("DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM video_tags)", [])?;
+    conn.execute(
+        "DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM video_tags)",
+        [],
+    )?;
     Ok(())
 }

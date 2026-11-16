@@ -80,7 +80,8 @@ pub async fn pick_folder() -> Result<Option<String>, String> {
 #[tauri::command]
 pub async fn set_root(state: State<'_, Arc<AppState>>, path: String) -> Result<String, String> {
     let st = state.inner().clone();
-    let canonical = std::fs::canonicalize(&path).map_err(|_| format!("Folder not found: {path}"))?;
+    let canonical =
+        std::fs::canonicalize(&path).map_err(|_| format!("Folder not found: {path}"))?;
     if !canonical.is_dir() {
         return Err("That path is not a folder.".into());
     }

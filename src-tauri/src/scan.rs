@@ -106,7 +106,10 @@ pub async fn run_scan(state: Arc<AppState>) {
     let root = match state.root_path() {
         Some(root) if root.is_dir() => root,
         Some(root) => {
-            fail(&state, format!("Library folder does not exist: {}", root.display()));
+            fail(
+                &state,
+                format!("Library folder does not exist: {}", root.display()),
+            );
             return;
         }
         None => {
@@ -140,7 +143,15 @@ pub async fn run_scan(state: Arc<AppState>) {
             seen.insert(f.path.clone());
             let res = {
                 let conn = state.db.lock().map_err(|e| anyhow!(e.to_string()))?;
-                db::upsert_file(&conn, &f.path, &f.file_name, &f.ext, f.size, f.mtime, now_ts)
+                db::upsert_file(
+                    &conn,
+                    &f.path,
+                    &f.file_name,
+                    &f.ext,
+                    f.size,
+                    f.mtime,
+                    now_ts,
+                )
             };
             match res {
                 Ok(u) => {

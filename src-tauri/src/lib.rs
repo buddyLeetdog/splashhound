@@ -1,4 +1,4 @@
-﻿pub mod commands;
+pub mod commands;
 pub mod db;
 pub mod media;
 pub mod scan;
@@ -312,4 +312,3 @@ pub fn headless_scan(dir: PathBuf, serve: bool) {
         });
     }
 }
-

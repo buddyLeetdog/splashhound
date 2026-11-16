@@ -1,4 +1,4 @@
-﻿use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use axum::{
     body::Body,
@@ -59,7 +59,11 @@ async fn media_handler(
         }
         return (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response();
     }
-    let mime = if direct { mime_for_ext(&video.ext) } else { "video/mp4" };
+    let mime = if direct {
+        mime_for_ext(&video.ext)
+    } else {
+        "video/mp4"
+    };
     let (is_head, range) = request_parts(&req);
     serve_file(is_head, range, &path, mime).await
 }
@@ -108,11 +112,7 @@ fn request_parts(req: &Request) -> (bool, Option<String>) {
     (is_head, range)
 }
 
-async fn image_response(
-    is_head: bool,
-    range: Option<String>,
-    path: &std::path::Path,
-) -> Response {
+async fn image_response(is_head: bool, range: Option<String>, path: &std::path::Path) -> Response {
     let mut res = serve_file(is_head, range, path, "image/jpeg").await;
     if res.status().is_success() {
         res.headers_mut().insert(
@@ -233,6 +233,3 @@ async fn serve_file(
         }
     }
 }
-
-
-

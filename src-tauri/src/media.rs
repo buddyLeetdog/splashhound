@@ -32,7 +32,8 @@ pub fn playback_str(ext: &str, vcodec: Option<&str>, acodec: Option<&str>) -> &'
     let a = acodec.unwrap_or("").to_ascii_lowercase();
     let browser_ext = matches!(ext.as_str(), "mp4" | "m4v" | "mov" | "webm" | "ogv" | "ogg");
     let browser_v = matches!(v.as_str(), "h264" | "vp8" | "vp9" | "av1");
-    let browser_a = a.is_empty() || matches!(a.as_str(), "aac" | "mp3" | "opus" | "vorbis" | "flac");
+    let browser_a =
+        a.is_empty() || matches!(a.as_str(), "aac" | "mp3" | "opus" | "vorbis" | "flac");
     if browser_ext && browser_v && browser_a {
         "direct"
     } else if matches!(v.as_str(), "h264" | "vp9" | "av1") {
@@ -124,7 +125,10 @@ pub async fn probe(ffprobe: &Path, file: &Path) -> Result<ProbeInfo> {
 
     if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
         for stream in streams {
-            let kind = stream.get("codec_type").and_then(|v| v.as_str()).unwrap_or("");
+            let kind = stream
+                .get("codec_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let codec = stream
                 .get("codec_name")
                 .and_then(|v| v.as_str())
@@ -198,13 +202,7 @@ pub fn thumb_times(duration_ms: Option<i64>, n: usize) -> Vec<f64> {
         .collect()
 }
 
-async fn try_extract(
-    ffmpeg: &Path,
-    src: &Path,
-    t: f64,
-    out: &Path,
-    seek_first: bool,
-) -> bool {
+async fn try_extract(ffmpeg: &Path, src: &Path, t: f64, out: &Path, seek_first: bool) -> bool {
     let mut cmd = tokio::process::Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin", "-y"]);
     if seek_first {
@@ -215,7 +213,14 @@ async fn try_extract(
         cmd.arg("-ss").arg(format!("{:.3}", t));
     }
     cmd.args([
-        "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "5", "-an", "-sn",
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=480:-2",
+        "-q:v",
+        "5",
+        "-an",
+        "-sn",
     ])
     .arg(out)
     .stdin(Stdio::null())
@@ -317,9 +322,9 @@ pub async fn run_conversion(state: &Arc<AppState>, v: &VideoDto, out: &Path) -> 
     if let Some(parent) = out.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let ffmpeg = state
-        .ffmpeg()
-        .ok_or_else(|| anyhow!("ffmpeg was not found. Install ffmpeg or set its folder in Settings."))?;
+    let ffmpeg = state.ffmpeg().ok_or_else(|| {
+        anyhow!("ffmpeg was not found. Install ffmpeg or set its folder in Settings.")
+    })?;
 
     let remux = v.playback == "remux";
     let tmp = out.with_extension("part.mp4");
@@ -362,14 +367,7 @@ async fn ffmpeg_convert(
         cmd.args(["-c:v", "copy"]);
     } else {
         cmd.args([
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "21",
-            "-pix_fmt",
-            "yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
         ]);
     }
     cmd.args(["-c:a", "aac", "-b:a", "160k"]);
