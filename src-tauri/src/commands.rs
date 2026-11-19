@@ -1297,6 +1297,10 @@ struct ExportVideo {
     path: String,
     #[serde(default)]
     md5: Option<String>,
+    /// Exact sampled-frame fingerprint; matches re-encoded copies whose bytes
+    /// differ but whose frames are identical.
+    #[serde(default)]
+    dna: Option<String>,
     #[serde(default)]
     creator: Option<String>,
     #[serde(default)]
@@ -1337,6 +1341,9 @@ pub struct ImportResult {
     pub matched: usize,
     pub unmatched: usize,
     pub total: usize,
+    pub by_hash: usize,
+    pub by_dna: usize,
+    pub by_path: usize,
 }
 
 #[tauri::command]
@@ -1355,18 +1362,29 @@ pub async fn export_library(state: State<'_, Arc<AppState>>) -> Result<Option<St
         return Ok(None);
     };
 
-    let videos = {
+    let export = {
         let conn = st.db.lock().map_err(err)?;
-        db::all_videos(&conn).map_err(err)?
+        build_export(&conn)?
     };
-    let export = ExportFile {
-        version: 1,
+    let text = serde_json::to_string_pretty(&export).map_err(err)?;
+    tokio::fs::write(&path, text).await.map_err(err)?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Snapshot every present video's metadata plus the matching keys (hash and
+/// DNA) into the portable export file.
+fn build_export(conn: &rusqlite::Connection) -> Result<ExportFile, String> {
+    let videos = db::all_videos(conn).map_err(err)?;
+    let dna = db::dna_map(conn).map_err(err)?;
+    Ok(ExportFile {
+        version: 2,
         exported_at: scan::now(),
         videos: videos
             .iter()
             .map(|v| ExportVideo {
                 path: v.path.clone(),
                 md5: v.md5.clone(),
+                dna: dna.get(&v.id).cloned(),
                 creator: v.creator.clone(),
                 nsfw: v.nsfw,
                 popping: v.popping,
@@ -1380,10 +1398,7 @@ pub async fn export_library(state: State<'_, Arc<AppState>>) -> Result<Option<St
                 toys: v.toys.clone(),
             })
             .collect(),
-    };
-    let text = serde_json::to_string_pretty(&export).map_err(err)?;
-    tokio::fs::write(&path, text).await.map_err(err)?;
-    Ok(Some(path.to_string_lossy().to_string()))
+    })
 }
 
 #[tauri::command]
@@ -1407,10 +1422,24 @@ pub async fn import_library(
     let data: ExportFile = serde_json::from_str(&text)
         .map_err(|e| format!("Not a Splashhound metadata export: {e}"))?;
 
+    let mut conn = st.db.lock().map_err(err)?;
+    let result = import_metadata(&mut conn, &data)?;
+    Ok(Some(result))
+}
+
+/// Apply an exported metadata file to the current library. Byte-identical files
+/// are matched by MD5, re-encodes by an exact DNA fingerprint, and only then by
+/// the stored path.
+fn import_metadata(
+    conn: &mut rusqlite::Connection,
+    data: &ExportFile,
+) -> Result<ImportResult, String> {
     let total = data.videos.len();
     let mut matched = 0usize;
     let mut unmatched = 0usize;
-    let mut conn = st.db.lock().map_err(err)?;
+    let mut by_hash_count = 0usize;
+    let mut by_dna_count = 0usize;
+    let mut by_path_count = 0usize;
     for item in &data.videos {
         let by_hash: Option<i64> = if let Some(md5) = item.md5.as_deref().filter(|m| !m.is_empty())
         {
@@ -1424,18 +1453,37 @@ pub async fn import_library(
         } else {
             None
         };
-        let id = match by_hash {
-            Some(id) => Some(id),
-            None => conn
-                .query_row(
-                    "SELECT id FROM videos WHERE path = ?1 LIMIT 1",
-                    params![item.path],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(err)?,
+        // Byte-identical files first. If the bytes differ (re-encode, different
+        // container), fall back to an exact DNA fingerprint match: every sampled
+        // frame hash has to be identical, i.e. a 100% match.
+        let by_dna: Option<i64> = if by_hash.is_none() {
+            match item.dna.as_deref().filter(|d| !d.is_empty()) {
+                Some(frames) => db::find_by_dna(conn, frames).map_err(err)?,
+                None => None,
+            }
+        } else {
+            None
         };
-        let Some(id) = id else {
+        // Path is only a last resort, for restoring into the same folder
+        // layout. A moved collection is expected to match by hash or DNA.
+        let by_path: Option<i64> = if by_hash.is_none() && by_dna.is_none() {
+            conn.query_row(
+                "SELECT id FROM videos WHERE path = ?1 AND missing = 0 LIMIT 1",
+                params![item.path],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?
+        } else {
+            None
+        };
+        let (id, source) = if let Some(id) = by_hash {
+            (id, 1)
+        } else if let Some(id) = by_dna {
+            (id, 2)
+        } else if let Some(id) = by_path {
+            (id, 3)
+        } else {
             unmatched += 1;
             continue;
         };
@@ -1452,17 +1500,25 @@ pub async fn import_library(
             tags: Some(item.tags.clone()),
             toys: Some(item.toys.clone()),
         };
-        if db::save_video(&mut conn, id, &patch).is_ok() {
+        if db::save_video(conn, id, &patch).is_ok() {
             matched += 1;
+            match source {
+                1 => by_hash_count += 1,
+                2 => by_dna_count += 1,
+                _ => by_path_count += 1,
+            }
         } else {
             unmatched += 1;
         }
     }
-    Ok(Some(ImportResult {
+    Ok(ImportResult {
         matched,
         unmatched,
         total,
-    }))
+        by_hash: by_hash_count,
+        by_dna: by_dna_count,
+        by_path: by_path_count,
+    })
 }
 
 #[tauri::command]
@@ -1496,4 +1552,102 @@ pub async fn backup_database(state: State<'_, Arc<AppState>>) -> Result<Option<S
     .map_err(err)??;
 
     Ok(Some(path.to_string_lossy().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(db::SCHEMA).unwrap();
+        conn
+    }
+
+    fn add_video(
+        conn: &rusqlite::Connection,
+        path: &str,
+        md5: Option<&str>,
+        dna: Option<&str>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO videos(path, file_name, added_at, md5, missing)
+             VALUES (?1, ?2, 1, ?3, 0)",
+            params![path, path, md5],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        if let Some(frames) = dna {
+            conn.execute(
+                "INSERT INTO video_dna(video_id, frames) VALUES (?1, ?2)",
+                params![id, frames],
+            )
+            .unwrap();
+        }
+        id
+    }
+
+    fn entry(path: &str, md5: Option<&str>, dna: Option<&str>, creator: &str) -> ExportVideo {
+        ExportVideo {
+            path: path.to_string(),
+            md5: md5.map(str::to_string),
+            dna: dna.map(str::to_string),
+            creator: Some(creator.to_string()),
+            nsfw: false,
+            popping: false,
+            destruction: false,
+            deflation: false,
+            inflation: false,
+            notes: None,
+            rating: 4,
+            reviewed: true,
+            tags: Vec::new(),
+            toys: Vec::new(),
+        }
+    }
+
+    fn creator(conn: &rusqlite::Connection, id: i64) -> Option<String> {
+        db::get_video(conn, id).unwrap().unwrap().creator
+    }
+
+    #[test]
+    fn import_matches_by_hash_dna_and_path() {
+        let mut conn = test_conn();
+        let hash_id = add_video(&conn, "/lib/a.mp4", Some("aaa"), None);
+        let dna_id = add_video(&conn, "/lib/b.mp4", Some("bbb"), Some("1,2,3,4"));
+        let path_id = add_video(&conn, "/lib/c.mp4", None, None);
+
+        let export = ExportFile {
+            version: 2,
+            exported_at: 0,
+            videos: vec![
+                entry("/elsewhere/a.mp4", Some("aaa"), None, "hash"),
+                entry("/elsewhere/b.mp4", Some("zzz"), Some("1,2,3,4"), "dna"),
+                entry("/lib/c.mp4", None, None, "path"),
+                entry("/elsewhere/missing.mp4", None, None, "none"),
+            ],
+        };
+
+        let result = import_metadata(&mut conn, &export).unwrap();
+        assert_eq!(result.matched, 3);
+        assert_eq!(result.unmatched, 1);
+        assert_eq!(result.by_hash, 1);
+        assert_eq!(result.by_dna, 1);
+        assert_eq!(result.by_path, 1);
+        assert_eq!(creator(&conn, hash_id).as_deref(), Some("hash"));
+        assert_eq!(creator(&conn, dna_id).as_deref(), Some("dna"));
+        assert_eq!(creator(&conn, path_id).as_deref(), Some("path"));
+    }
+
+    #[test]
+    fn export_includes_hash_and_dna() {
+        let conn = test_conn();
+        add_video(&conn, "/lib/a.mp4", Some("aaa"), Some("1,2,3,4"));
+
+        let export = build_export(&conn).unwrap();
+        assert_eq!(export.version, 2);
+        assert_eq!(export.videos.len(), 1);
+        assert_eq!(export.videos[0].md5.as_deref(), Some("aaa"));
+        assert_eq!(export.videos[0].dna.as_deref(), Some("1,2,3,4"));
+    }
 }

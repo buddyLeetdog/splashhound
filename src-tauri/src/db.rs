@@ -848,6 +848,12 @@ pub struct Stats {
     pub unreviewed: i64,
     pub nsfw: i64,
     pub tagged: i64,
+    /// Distinct tags that are actually used by at least one present video.
+    pub tag_count: i64,
+    /// Distinct toys that are actually used by at least one present video.
+    pub toy_count: i64,
+    pub popping: i64,
+    pub destruction: i64,
     pub duplicates: i64,
     pub missing: i64,
     pub total_size: i64,
@@ -903,6 +909,28 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
         r.get(0)
     })?;
     s.trash = conn.query_row("SELECT COUNT(*) FROM trash", [], |r| r.get(0))?;
+    s.popping = conn.query_row(
+        "SELECT COUNT(*) FROM videos WHERE missing = 0 AND popping = 1",
+        [],
+        |r| r.get(0),
+    )?;
+    s.destruction = conn.query_row(
+        "SELECT COUNT(*) FROM videos WHERE missing = 0 AND destruction = 1",
+        [],
+        |r| r.get(0),
+    )?;
+    s.tag_count = conn.query_row(
+        "SELECT COUNT(DISTINCT vt.tag_id) FROM video_tags vt
+         JOIN videos v ON v.id = vt.video_id WHERE v.missing = 0",
+        [],
+        |r| r.get(0),
+    )?;
+    s.toy_count = conn.query_row(
+        "SELECT COUNT(DISTINCT vt.toy_id) FROM video_toys vt
+         JOIN videos v ON v.id = vt.video_id WHERE v.missing = 0",
+        [],
+        |r| r.get(0),
+    )?;
     s.dna_done = conn.query_row("SELECT COUNT(*) FROM video_dna", [], |r| r.get(0))?;
     s.dna_pending = conn.query_row(
         "SELECT COUNT(*) FROM videos
@@ -1807,6 +1835,28 @@ pub fn reset_dna_failures(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Stored DNA fingerprints, keyed by video id. Used by metadata export.
+pub fn dna_map(conn: &Connection) -> Result<HashMap<i64, String>> {
+    let mut stmt = conn.prepare("SELECT video_id, frames FROM video_dna")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
+/// Find a present video with the exact same DNA fingerprint. The string holds
+/// every sampled frame hash, so equality means 100% of the sample matched.
+pub fn find_by_dna(conn: &Connection, frames: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT d.video_id FROM video_dna d
+             JOIN videos v ON v.id = d.video_id
+             WHERE d.frames = ?1 AND v.missing = 0
+             LIMIT 1",
+            params![frames],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// Number of videos that need conversion for playback or have irregular timing.
 pub fn old_codec_count(conn: &Connection) -> Result<i64> {
     let mut stmt =
@@ -2115,5 +2165,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM videos", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 1);
+    }
+
+    #[test]
+    fn stats_counts_tags_toys_and_flags() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO videos(path, file_name, added_at, popping, destruction)
+             VALUES ('a', 'a', 1, 1, 0)",
+            [],
+        )
+        .unwrap();
+        let a = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO videos(path, file_name, added_at, popping, destruction)
+             VALUES ('b', 'b', 1, 0, 1)",
+            [],
+        )
+        .unwrap();
+        let b = conn.last_insert_rowid();
+        conn.execute("INSERT INTO tags(name) VALUES ('t1'), ('t2')", [])
+            .unwrap();
+        conn.execute("INSERT INTO toys(name) VALUES ('y1')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO video_tags(video_id, tag_id) VALUES (?1, 1), (?2, 2), (?1, 2)",
+            params![a, b],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO video_toys(video_id, toy_id) VALUES (?1, 1), (?2, 1)",
+            params![a, b],
+        )
+        .unwrap();
+
+        let s = stats(&conn).unwrap();
+        assert_eq!(s.popping, 1);
+        assert_eq!(s.destruction, 1);
+        assert_eq!(s.tag_count, 2);
+        assert_eq!(s.toy_count, 1);
     }
 }

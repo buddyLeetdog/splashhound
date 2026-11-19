@@ -152,6 +152,14 @@ label { color: var(--muted); font-size: 12px; display: block; margin-bottom: 4px
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 12px; margin-bottom: 12px;
 }
+.filter-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.filter-panels > .tag-filter { margin-bottom: 0; }
+.filter-panels + .chips { margin-top: 12px; }
+@media (max-width: 900px) {
+  .filter-panels { grid-template-columns: 1fr; }
+  .filter-panels > .tag-filter { margin-bottom: 0; }
+}
+.tag-filter.hidden { display: none; }
 .tag-filter-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip {

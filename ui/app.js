@@ -552,8 +552,10 @@ function viewLibrary() {
       <button class="btn" id="f-select">Select</button>
     </div>
 
-    <div class="tag-filter hidden" id="tag-filter"></div>
-    <div class="tag-filter hidden" id="toy-filter"></div>
+    <div class="filter-panels">
+      <div class="tag-filter" id="tag-filter"></div>
+      <div class="tag-filter" id="toy-filter"></div>
+    </div>
     <div class="chips" id="active-filters" style="margin-bottom:12px"></div>
 
     <div class="bulk-bar hidden" id="bulk-bar">
@@ -3533,6 +3535,10 @@ function renderStats() {
     ['Added last 7 days', data.addedWeek || 0],
     ['Without toys', data.noToys || 0],
     ['Without tags', data.noTags || 0],
+    ['Tags', s.tagCount || 0],
+    ['Toys', s.toyCount || 0],
+    ...(state.visibleFlags.popping ? [['Popping', s.popping || 0]] : []),
+    ...(state.visibleFlags.destruction ? [['Destruction', s.destruction || 0]] : []),
     ['In trash', s.trash || 0],
     ['DNA analyzed', `${s.dnaDone || 0} / ${(s.dnaDone || 0) + (s.dnaPending || 0)}`],
   ];
@@ -3804,7 +3810,7 @@ function viewSettings() {
             ? `<button class="btn danger" id="set-purge">Remove ${state.stats.missing} missing entr${state.stats.missing === 1 ? 'y' : 'ies'}</button>`
             : ''}
         </div>
-        <p class="muted small">Export writes tags, ratings and flags for every video as JSON; import matches entries back by MD5 hash, then by path.</p>
+        <p class="muted small">Export writes tags, ratings and flags for every video as JSON, together with its MD5 hash and video DNA fingerprint. Import matches each entry by MD5 first, then by an exact (100%) DNA match, and only falls back to the file path when neither exists. This makes it usable when the same collection lives in a different folder structure.</p>
       </section>
 
       <section class="panel">
@@ -3812,6 +3818,9 @@ function viewSettings() {
         <div class="kv">Videos: ${state.stats.total || 0} (${fmtSize(state.stats.totalSize || 0)})</div>
         <div class="kv">Reviewed: ${state.stats.reviewed || 0} \u00b7 Unreviewed: ${state.stats.unreviewed || 0}</div>
         <div class="kv">Tagged: ${state.stats.tagged || 0}${state.visibleFlags.nsfw ? ` \u00b7 NSFW: ${state.stats.nsfw || 0}` : ''}</div>
+        <div class="kv">Distinct tags: ${state.stats.tagCount || 0} \u00b7 Distinct toys: ${state.stats.toyCount || 0}</div>
+        ${state.visibleFlags.popping ? `<div class="kv">Popping: ${state.stats.popping || 0}</div>` : ''}
+        ${state.visibleFlags.destruction ? `<div class="kv">Destruction: ${state.stats.destruction || 0}</div>` : ''}
         <div class="kv">Duplicate groups: ${state.stats.duplicates || 0}</div>
         <div class="kv">Hash: ${state.stats.hashPending || 0} pending \u00b7 ${state.stats.hashSkipped || 0} skipped</div>
         <div class="kv">Video DNA: ${state.stats.dnaDone || 0} analyzed \u00b7 ${state.stats.dnaPending || 0} to go</div>
@@ -4219,8 +4228,13 @@ function viewSettings() {
     try {
       const res = await invoke('import_library');
       if (!res) return;
+      const parts = [
+        res.byHash ? `${res.byHash} by hash` : '',
+        res.byDna ? `${res.byDna} by DNA` : '',
+        res.byPath ? `${res.byPath} by path` : '',
+      ].filter(Boolean);
       toast(
-        `Imported ${res.matched} of ${res.total} entries${res.unmatched ? ` (${res.unmatched} not found)` : ''}.`,
+        `Imported ${res.matched} of ${res.total} entries${parts.length ? ` (${parts.join(', ')})` : ''}${res.unmatched ? ` \u00b7 ${res.unmatched} not found` : ''}.`,
         res.unmatched ? 'error' : 'info',
       );
       await refreshMeta();
