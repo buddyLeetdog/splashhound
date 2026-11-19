@@ -39,7 +39,7 @@ Prebuilt binaries are attached to
 - **Windows**: unzip `splashhound-windows-x64.zip` and run `splashhound.exe`.
   WebView2 is required (preinstalled on Windows 10/11); ffmpeg is recommended.
 - **Ubuntu / Debian**: install the `.deb` with
-  `sudo apt install ./splashhound_1.2.0_amd64.deb`. Requires Ubuntu 24.04+ or
+  `sudo apt install ./splashhound_1.2.1_amd64.deb`. Requires Ubuntu 24.04+ or
   Debian 13+ (WebKitGTK 4.1).
 - **Other Linux**: unpack `splashhound-linux-x64.tar.gz` and run
   `./splashhound`. It is built against Ubuntu 24.04, so it needs glibc 2.39+
