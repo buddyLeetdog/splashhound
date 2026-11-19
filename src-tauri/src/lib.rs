@@ -328,6 +328,7 @@ pub fn run() {
             commands::delete_toy,
             commands::creators,
             commands::reveal,
+            commands::open_external,
             commands::cache_size,
             commands::clear_cache,
             commands::set_ffmpeg_dir,

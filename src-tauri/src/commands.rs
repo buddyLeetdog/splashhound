@@ -825,6 +825,53 @@ pub async fn reveal(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), Stri
     Ok(())
 }
 
+/// Play a file with the system's default video player instead of the built-in
+/// one. Useful for formats the app can stream but the user wants to inspect in
+/// their usual player.
+#[tauri::command]
+pub async fn open_external(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), String> {
+    let video = state.inner().video(id).ok_or("Video not found.")?;
+    let path = Path::new(&video.path);
+    if !path.is_file() {
+        return Err("The file is no longer available.".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // ShellExec_RunDLL goes through ShellExecute, so it uses the default
+        // handler for the extension without a console window or shell parsing.
+        let mut command = std::process::Command::new("rundll32.exe");
+        command
+            .arg("shell32.dll,ShellExec_RunDLL")
+            .arg(path)
+            .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        command
+            .spawn()
+            .map_err(|e| format!("could not open the video: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("could not open the video: {e}"))?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("gio")
+                    .arg("open")
+                    .arg(path)
+                    .spawn()
+            })
+            .map_err(|e| format!("could not open the video: {e}"))?;
+    }
+    Ok(())
+}
+
 fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(path) {
@@ -1295,6 +1342,9 @@ pub async fn similar_duplicates(
 #[derive(Serialize, Deserialize)]
 struct ExportVideo {
     path: String,
+    /// Path inside the library, independent of where the library root is now.
+    #[serde(default)]
+    rel_path: Option<String>,
     #[serde(default)]
     md5: Option<String>,
     /// Exact sampled-frame fingerprint; matches re-encoded copies whose bytes
@@ -1371,18 +1421,19 @@ pub async fn export_library(state: State<'_, Arc<AppState>>) -> Result<Option<St
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
-/// Snapshot every present video's metadata plus the matching keys (hash and
-/// DNA) into the portable export file.
+/// Snapshot every present video's metadata plus the matching keys (hash, DNA
+/// and library-relative path) into the portable export file.
 fn build_export(conn: &rusqlite::Connection) -> Result<ExportFile, String> {
     let videos = db::all_videos(conn).map_err(err)?;
     let dna = db::dna_map(conn).map_err(err)?;
     Ok(ExportFile {
-        version: 2,
+        version: 3,
         exported_at: scan::now(),
         videos: videos
             .iter()
             .map(|v| ExportVideo {
                 path: v.path.clone(),
+                rel_path: v.rel_path.clone(),
                 md5: v.md5.clone(),
                 dna: dna.get(&v.id).cloned(),
                 creator: v.creator.clone(),
@@ -1464,16 +1515,35 @@ fn import_metadata(
         } else {
             None
         };
-        // Path is only a last resort, for restoring into the same folder
-        // layout. A moved collection is expected to match by hash or DNA.
+        // Path is only a last resort. Prefer the library-relative path so a
+        // copied collection matches even when its root moved; separators are
+        // normalised because an export can come from another platform. Only
+        // fall back to the old absolute path when the export has no rel_path.
         let by_path: Option<i64> = if by_hash.is_none() && by_dna.is_none() {
-            conn.query_row(
-                "SELECT id FROM videos WHERE path = ?1 AND missing = 0 LIMIT 1",
-                params![item.path],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(err)?
+            let by_rel = match item.rel_path.as_deref().filter(|r| !r.is_empty()) {
+                Some(rel) => conn
+                    .query_row(
+                        "SELECT id FROM videos
+                         WHERE replace(rel_path, '\\', '/') = replace(?1, '\\', '/')
+                           AND missing = 0 LIMIT 1",
+                        params![rel],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(err)?,
+                None => None,
+            };
+            match by_rel {
+                Some(id) => Some(id),
+                None => conn
+                    .query_row(
+                        "SELECT id FROM videos WHERE path = ?1 AND missing = 0 LIMIT 1",
+                        params![item.path],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(err)?,
+            }
         } else {
             None
         };
@@ -1590,6 +1660,7 @@ mod tests {
     fn entry(path: &str, md5: Option<&str>, dna: Option<&str>, creator: &str) -> ExportVideo {
         ExportVideo {
             path: path.to_string(),
+            rel_path: None,
             md5: md5.map(str::to_string),
             dna: dna.map(str::to_string),
             creator: Some(creator.to_string()),
@@ -1618,7 +1689,7 @@ mod tests {
         let path_id = add_video(&conn, "/lib/c.mp4", None, None);
 
         let export = ExportFile {
-            version: 2,
+            version: 3,
             exported_at: 0,
             videos: vec![
                 entry("/elsewhere/a.mp4", Some("aaa"), None, "hash"),
@@ -1640,14 +1711,45 @@ mod tests {
     }
 
     #[test]
-    fn export_includes_hash_and_dna() {
+    fn import_matches_by_relative_path_when_root_moved() {
+        let mut conn = test_conn();
+        conn.execute(
+            "INSERT INTO videos(path, rel_path, file_name, added_at)
+             VALUES ('/new/root/sub/c.mp4', 'sub/c.mp4', 'c.mp4', 1)",
+            [],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+
+        let mut item = entry("/old/root/sub/c.mp4", None, None, "rel");
+        // Windows-style separator in the export, Linux-style in the database.
+        item.rel_path = Some("sub\\c.mp4".into());
+        let export = ExportFile {
+            version: 3,
+            exported_at: 0,
+            videos: vec![item],
+        };
+
+        let result = import_metadata(&mut conn, &export).unwrap();
+        assert_eq!(result.by_path, 1);
+        assert_eq!(creator(&conn, id).as_deref(), Some("rel"));
+    }
+
+    #[test]
+    fn export_includes_hash_dna_and_relative_path() {
         let conn = test_conn();
-        add_video(&conn, "/lib/a.mp4", Some("aaa"), Some("1,2,3,4"));
+        let id = add_video(&conn, "/lib/a.mp4", Some("aaa"), Some("1,2,3,4"));
+        conn.execute(
+            "UPDATE videos SET rel_path = 'sub/a.mp4' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
 
         let export = build_export(&conn).unwrap();
-        assert_eq!(export.version, 2);
+        assert_eq!(export.version, 3);
         assert_eq!(export.videos.len(), 1);
         assert_eq!(export.videos[0].md5.as_deref(), Some("aaa"));
         assert_eq!(export.videos[0].dna.as_deref(), Some("1,2,3,4"));
+        assert_eq!(export.videos[0].rel_path.as_deref(), Some("sub/a.mp4"));
     }
 }

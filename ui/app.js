@@ -504,7 +504,7 @@ function viewLibrary() {
     </header>
 
     <div class="toolbar">
-      <input class="input search" id="f-search" placeholder="Search file name, path, creator, notes..." value="${esc(f.search)}">
+      <input class="input search" id="f-search" placeholder="Search name, path, creator, notes (comma = any)..." value="${esc(f.search)}">
       <select class="select" id="f-folder">${folderOptionsHtml(f.folder)}</select>
       ${state.visibleFlags.nsfw ? `
       <select class="select" id="f-nsfw">
@@ -2221,6 +2221,7 @@ function detailRightHtml(v, ids, index) {
     </dl>
     ${editorHtml(v, 'd')}
     <div class="modal-actions">
+      <button class="btn" id="d-open" title="Play with the system's default video player">Open in player</button>
       <button class="btn" id="d-reveal">Show in folder</button>
       <button class="btn danger" id="d-delete">Move to trash</button>
       <button class="btn" data-close>Close</button>
@@ -2295,6 +2296,9 @@ function mountDetail(v, ids, index, root, close, fullscreen = false) {
 
   $('#d-prev', right).onclick = () => navigateDetail(-1);
   $('#d-next', right).onclick = () => navigateDetail(1);
+  $('#d-open', right).onclick = () => {
+    invoke('open_external', { id: v.id }).catch((err) => toast(String(err), 'error'));
+  };
   $('#d-reveal', right).onclick = () => {
     invoke('reveal', { id: v.id }).catch((err) => toast(String(err), 'error'));
   };
@@ -3094,6 +3098,7 @@ function renderSimilar() {
 }
 
 function similarGroupHtml(group, index) {
+  const reviewed = group.videos.filter((v) => v.reviewed).length;
   const rows = group.videos.map((v, rowIndex) => `
     <tr data-id="${v.id}">
       <td><input type="radio" name="keep-sim-${index}" value="${v.id}" ${state.keep[`sim-${index}`] === v.id ? 'checked' : ''}></td>
@@ -3102,7 +3107,7 @@ function similarGroupHtml(group, index) {
       </td>
       <td>
         <button type="button" class="linkish fname" data-open-id="${v.id}" title="Open ${esc(v.fileName)}">${esc(v.fileName)}</button>
-        ${rowIndex === 0 ? '<span class="badge best" title="Highest resolution / largest file">best</span>' : ''}
+        ${rowIndex === 0 ? '<span class="badge best" title="Highest resolution / largest file">best</span>' : ''}${reviewedBadge(v)}
         <div class="muted small fname" title="${esc(v.path)}">${esc(v.path)}</div>
       </td>
       <td>${fmtSize(v.size)}</td>
@@ -3117,6 +3122,7 @@ function similarGroupHtml(group, index) {
       <div class="dup-head">
         <span class="score">${Math.round(group.score * 100)}% frame match</span>
         <span>${group.videos.length} videos</span>
+        ${reviewed ? `<span class="badge reviewed">${reviewed} reviewed</span>` : ''}
       </div>
       <table class="dup-table">
         <thead>
@@ -3204,11 +3210,13 @@ function autoPick(videos) {
 }
 
 function dupGroupHtml(group) {
+  const reviewed = group.videos.filter((v) => v.reviewed).length;
   return `
     <section class="dup-group" data-md5="${esc(group.md5)}">
       <div class="dup-head">
         <span class="hash">${esc(group.md5.slice(0, 16))}...</span>
         <span>${group.videos.length} copies</span>
+        ${reviewed ? `<span class="badge reviewed">${reviewed} reviewed</span>` : ''}
         <span class="save">${fmtSize(group.wasted)} recoverable</span>
       </div>
       <table class="dup-table">
@@ -3229,7 +3237,7 @@ function dupGroupHtml(group) {
             <tr data-id="${v.id}">
               <td><input type="radio" name="keep-${esc(group.md5)}" value="${v.id}" ${state.keep[group.md5] === v.id ? 'checked' : ''}></td>
               <td>
-                <button type="button" class="linkish fname" data-open-id="${v.id}" title="Open ${esc(v.fileName)}">${esc(v.fileName)}</button>
+                <button type="button" class="linkish fname" data-open-id="${v.id}" title="Open ${esc(v.fileName)}">${esc(v.fileName)}</button>${reviewedBadge(v)}
                 <div class="muted small fname" title="${esc(v.path)}">${esc(v.path)}</div>
               </td>
               <td>${fmtSize(v.size)}</td>
@@ -3246,6 +3254,14 @@ function dupGroupHtml(group) {
         <button class="btn danger" data-trash>Move others to trash</button>
       </div>
     </section>`;
+}
+
+/** Mark copies that already have a review/rating in the duplicate views. */
+function reviewedBadge(video) {
+  if (!video.reviewed) return '';
+  const stars = video.rating > 0 ? ` \u00b7 ${'\u2605'.repeat(video.rating)}` : '';
+  const title = video.rating > 0 ? `Already reviewed (${video.rating} stars)` : 'Already reviewed';
+  return `<span class="badge reviewed" title="${title}">reviewed${stars}</span>`;
 }
 
 async function trashOthers(group, key = group.md5) {
@@ -3810,7 +3826,7 @@ function viewSettings() {
             ? `<button class="btn danger" id="set-purge">Remove ${state.stats.missing} missing entr${state.stats.missing === 1 ? 'y' : 'ies'}</button>`
             : ''}
         </div>
-        <p class="muted small">Export writes tags, ratings and flags for every video as JSON, together with its MD5 hash and video DNA fingerprint. Import matches each entry by MD5 first, then by an exact (100%) DNA match, and only falls back to the file path when neither exists. This makes it usable when the same collection lives in a different folder structure.</p>
+        <p class="muted small">Export writes tags, ratings and flags for every video as JSON, together with its MD5, video DNA fingerprint and library-relative path. Import matches each entry by MD5 first, then by an exact (100%) DNA match, then by the relative path, so a collection in a different folder structure still lines up. The old absolute path is only used for exports that have no relative path.</p>
       </section>
 
       <section class="panel">

@@ -13,14 +13,14 @@ Build locally after compiling the app:
 
 ```bash
 cargo build --release --manifest-path src-tauri/Cargo.toml
-bash packaging/linux/build_deb.sh 1.2.1
-# -> dist/splashhound_1.2.1_amd64.deb
+bash packaging/linux/build_deb.sh 1.3.0
+# -> dist/splashhound_1.3.0_amd64.deb
 ```
 
 Install with:
 
 ```bash
-sudo apt install ./dist/splashhound_1.2.1_amd64.deb
+sudo apt install ./dist/splashhound_1.3.0_amd64.deb
 ```
 
 Requires WebKitGTK 4.1 (Ubuntu 24.04+ / Debian 13+) — that dependency is

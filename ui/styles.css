@@ -534,6 +534,7 @@ kbd {
 
 
 .badge.best { background: rgba(53, 208, 165, 0.16); color: #bff3e4; border-color: rgba(53, 208, 165, 0.35); margin-left: 6px; }
+.badge.reviewed { background: rgba(160, 170, 185, 0.16); color: #d6dde6; border-color: rgba(160, 170, 185, 0.32); margin-left: 6px; }
 
 
 .file-path { word-break: break-all; line-height: 1.35; margin: 2px 0 10px; user-select: text; }

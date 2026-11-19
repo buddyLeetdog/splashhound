@@ -108,13 +108,15 @@ pub const VIDEO_COLS: &str = "v.id, v.path, v.file_name, v.ext, v.size, v.mtime,
      v.duration_ms, v.width, v.height, v.vcodec, v.acodec, v.has_audio, v.md5, \
      v.creator, v.nsfw, v.popping, v.destruction, v.deflation, v.inflation, \
      v.notes, v.rating, v.reviewed, v.view_count, v.added_at, v.missing, v.pix_fmt, \
-     v.fps, v.vfr";
+     v.fps, v.vfr, v.rel_path";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoDto {
     pub id: i64,
     pub path: String,
+    /// Path relative to the library root, when the file is inside it.
+    pub rel_path: Option<String>,
     pub file_name: String,
     pub ext: String,
     pub size: i64,
@@ -170,6 +172,7 @@ pub fn video_from_row(r: &Row<'_>) -> rusqlite::Result<VideoDto> {
     Ok(VideoDto {
         id: r.get(0)?,
         path: r.get(1)?,
+        rel_path: r.get(28)?,
         file_name: r.get(2)?,
         ext,
         size: r.get(4)?,
@@ -642,17 +645,29 @@ fn build_where(f: &VideoFilter) -> (String, Vec<SqlValue>) {
     let mut vals: Vec<SqlValue> = Vec::new();
 
     if let Some(s) = f.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let like = format!("%{}%", s);
-        clauses.push(
-            "(v.file_name LIKE ? COLLATE NOCASE OR v.path LIKE ? COLLATE NOCASE \
-              OR COALESCE(v.creator,'') LIKE ? COLLATE NOCASE \
-              OR COALESCE(v.notes,'') LIKE ? COLLATE NOCASE \
-              OR EXISTS (SELECT 1 FROM video_toys vt JOIN toys t ON t.id = vt.toy_id
-                         WHERE vt.video_id = v.id AND t.name LIKE ? COLLATE NOCASE))"
-                .into(),
-        );
-        for _ in 0..5 {
-            vals.push(SqlValue::Text(like.clone()));
+        // Comma-separated terms broaden the search: a video matches when any of
+        // them appears in its name, path, creator, notes or toy names.
+        let mut clause = String::new();
+        let mut first = true;
+        for term in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            if !first {
+                clause.push_str(" OR ");
+            }
+            first = false;
+            clause.push_str(
+                "(v.file_name LIKE ? COLLATE NOCASE OR v.path LIKE ? COLLATE NOCASE \
+                  OR COALESCE(v.creator,'') LIKE ? COLLATE NOCASE \
+                  OR COALESCE(v.notes,'') LIKE ? COLLATE NOCASE \
+                  OR EXISTS (SELECT 1 FROM video_toys vt JOIN toys t ON t.id = vt.toy_id
+                             WHERE vt.video_id = v.id AND t.name LIKE ? COLLATE NOCASE))",
+            );
+            let like = format!("%{term}%");
+            for _ in 0..5 {
+                vals.push(SqlValue::Text(like.clone()));
+            }
+        }
+        if !first {
+            clauses.push(format!("({clause})"));
         }
     }
 
@@ -2165,6 +2180,28 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM videos", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 1);
+    }
+
+    #[test]
+    fn search_accepts_comma_separated_terms() {
+        let conn = test_conn();
+        for name in ["alpha.mp4", "beta.mp4", "gamma.mp4"] {
+            conn.execute(
+                "INSERT INTO videos(path, file_name, added_at) VALUES (?1, ?1, 1)",
+                params![name],
+            )
+            .unwrap();
+        }
+        let filter = VideoFilter {
+            search: Some(" alpha , beta, ".into()),
+            limit: 10,
+            ..Default::default()
+        };
+        let (total, items) = list_videos(&conn, &filter).unwrap();
+        assert_eq!(total, 2);
+        let mut names: Vec<String> = items.into_iter().map(|v| v.file_name).collect();
+        names.sort();
+        assert_eq!(names, vec!["alpha.mp4", "beta.mp4"]);
     }
 
     #[test]
