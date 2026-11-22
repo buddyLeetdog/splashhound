@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS videos (
   vfr         INTEGER NOT NULL DEFAULT 0,
   thumb_small BLOB,
   dna_failed  INTEGER NOT NULL DEFAULT 0,
+  native_failed INTEGER NOT NULL DEFAULT 0,
   has_audio   INTEGER NOT NULL DEFAULT 0,
   md5         TEXT,
   creator     TEXT,
@@ -108,7 +109,7 @@ pub const VIDEO_COLS: &str = "v.id, v.path, v.file_name, v.ext, v.size, v.mtime,
      v.duration_ms, v.width, v.height, v.vcodec, v.acodec, v.has_audio, v.md5, \
      v.creator, v.nsfw, v.popping, v.destruction, v.deflation, v.inflation, \
      v.notes, v.rating, v.reviewed, v.view_count, v.added_at, v.missing, v.pix_fmt, \
-     v.fps, v.vfr, v.rel_path";
+     v.fps, v.vfr, v.rel_path, v.native_failed";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +130,9 @@ pub struct VideoDto {
     pub pix_fmt: Option<String>,
     pub fps: Option<f64>,
     pub vfr: bool,
+    /// The webview's decoder failed on this file even though its metadata looks
+    /// playable; use the built-in ffmpeg player and list it in Old codecs.
+    pub native_failed: bool,
     pub has_audio: bool,
     pub md5: Option<String>,
     pub creator: Option<String>,
@@ -185,6 +189,7 @@ pub fn video_from_row(r: &Row<'_>) -> rusqlite::Result<VideoDto> {
         pix_fmt: pix_fmt.clone(),
         fps,
         vfr: vfr != 0,
+        native_failed: b(r.get(29)?),
         has_audio: b(r.get(11)?),
         md5: r.get(12)?,
         creator: r.get(13)?,
@@ -225,6 +230,12 @@ pub fn open(path: &Path) -> Result<Connection> {
     ensure_column(&conn, "videos", "vfr", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(&conn, "videos", "thumb_small", "BLOB")?;
     ensure_column(&conn, "videos", "dna_failed", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        &conn,
+        "videos",
+        "native_failed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(conn)
 }
 
@@ -548,7 +559,7 @@ pub fn old_codec_videos(conn: &Connection) -> Result<Vec<VideoDto>> {
     let mut out = Vec::new();
     for row in rows {
         let video = row?;
-        if video.playback == "transcode" || video.vfr {
+        if video.playback == "transcode" || video.vfr || video.native_failed {
             out.push(video);
         }
     }
@@ -1312,7 +1323,7 @@ pub fn upsert_file(
                 conn.execute(
                     "UPDATE videos SET size = ?2, mtime = ?3, rel_path = ?4, duration_ms = NULL, width = NULL,
                         height = NULL, vcodec = NULL, acodec = NULL, pix_fmt = NULL, fps = NULL, vfr = 0,
-                        has_audio = 0, md5 = NULL, hash_state = 0, missing = 0
+                        has_audio = 0, md5 = NULL, hash_state = 0, missing = 0, native_failed = 0
                      WHERE id = ?1",
                     params![id, size, mtime, rel_path],
                 )?;
@@ -1874,8 +1885,10 @@ pub fn find_by_dna(conn: &Connection, frames: &str) -> Result<Option<i64>> {
 
 /// Number of videos that need conversion for playback or have irregular timing.
 pub fn old_codec_count(conn: &Connection) -> Result<i64> {
-    let mut stmt =
-        conn.prepare("SELECT ext, vcodec, acodec, pix_fmt, vfr FROM videos WHERE missing = 0")?;
+    let mut stmt = conn.prepare(
+        "SELECT ext, vcodec, acodec, pix_fmt, vfr, native_failed
+         FROM videos WHERE missing = 0",
+    )?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -1883,22 +1896,33 @@ pub fn old_codec_count(conn: &Connection) -> Result<i64> {
             r.get::<_, Option<String>>(2)?,
             r.get::<_, Option<String>>(3)?,
             r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
         ))
     })?;
     let mut count = 0i64;
     for row in rows {
-        let (ext, vcodec, acodec, pix_fmt, vfr) = row?;
+        let (ext, vcodec, acodec, pix_fmt, vfr, native_failed) = row?;
         let transcode = crate::media::playback_str(
             &ext,
             vcodec.as_deref(),
             acodec.as_deref(),
             pix_fmt.as_deref(),
         ) == "transcode";
-        if vfr != 0 || transcode {
+        if vfr != 0 || native_failed != 0 || transcode {
             count += 1;
         }
     }
     Ok(count)
+}
+
+/// Remember that the webview's own decoder rejected this file. It is then
+/// played through ffmpeg and listed with the files that need conversion.
+pub fn set_native_failed(conn: &Connection, id: i64, failed: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE videos SET native_failed = ?2 WHERE id = ?1",
+        params![id, if failed { 1 } else { 0 }],
+    )?;
+    Ok(())
 }
 
 pub fn set_dna(
@@ -2202,6 +2226,34 @@ mod tests {
         let mut names: Vec<String> = items.into_iter().map(|v| v.file_name).collect();
         names.sort();
         assert_eq!(names, vec!["alpha.mp4", "beta.mp4"]);
+    }
+
+    #[test]
+    fn native_decode_failures_are_listed_as_old_codecs() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO videos(path, file_name, ext, size, vcodec, acodec, pix_fmt, native_failed)
+             VALUES ('a.mp4', 'a.mp4', 'mp4', 1, 'h264', 'aac', 'yuv420p', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO videos(path, file_name, ext, size, vcodec, acodec, pix_fmt, native_failed)
+             VALUES ('b.mp4', 'b.mp4', 'mp4', 1, 'h264', 'aac', 'yuv420p', 0)",
+            [],
+        )
+        .unwrap();
+
+        let items = old_codec_videos(&conn).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].file_name, "a.mp4");
+        assert!(items[0].native_failed);
+        assert_eq!(old_codec_count(&conn).unwrap(), 1);
+        assert_eq!(stats(&conn).unwrap().old_codecs, 1);
+
+        set_native_failed(&conn, items[0].id, false).unwrap();
+        assert!(old_codec_videos(&conn).unwrap().is_empty());
+        assert_eq!(old_codec_count(&conn).unwrap(), 0);
     }
 
     #[test]

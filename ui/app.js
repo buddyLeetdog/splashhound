@@ -1562,6 +1562,7 @@ function playStream(videoEl, overlay, video, mime, startSec = 0, freeze = null, 
   videoEl.pause();
   videoEl.removeAttribute('src');
   videoEl.load();
+  videoEl.onerror = null;
 
   // WebView2 always has MediaSource; WebKitGTK builds may not. Fail with a
   // clear hint instead of a ReferenceError deeper in the setup.
@@ -2088,7 +2089,7 @@ async function releasePlayback() {
  *  is not directly playable by the webview. */
 function playbackText(v) {
   const native = state.boot?.nativePlayer;
-  if (native && (v.playback !== 'direct' || v.vfr)) return 'stream (built-in player)';
+  if (native && (v.playback !== 'direct' || v.vfr || v.nativeFailed)) return 'stream (built-in player)';
   return v.playback;
 }
 
@@ -2099,13 +2100,14 @@ function playVideo(videoEl, overlay, video, onReady) {
   videoEl.pause();
   videoEl.removeAttribute('src');
   videoEl.load();
+  videoEl.onerror = null;
   overlay.classList.remove('hidden');
   overlay.innerHTML = '<div class="spinner"></div><div>Preparing...</div>';
 
   (async () => {
     // Start the decoder immediately if the built-in player is going to be used;
     // it runs while the dialog renders, so the first frame is ready sooner.
-    const willStream = (video.playback !== 'direct' || video.vfr) && state.boot?.nativePlayer;
+    const willStream = (video.playback !== 'direct' || video.vfr || video.nativeFailed) && state.boot?.nativePlayer;
     let warm = willStream ? openStreamSocket(video, 0) : null;
     const dropWarm = () => {
       if (warm) {
@@ -2147,6 +2149,30 @@ function playVideo(videoEl, overlay, video, onReady) {
       overlay.classList.add('hidden');
       invoke('mark_viewed', { id: video.id }).catch(() => {});
       if (onReady) onReady();
+      // A malformed H.264 stream can make the webview's decoder fail outright
+      // even though ffmpeg can read it. Re-decode with the built-in player and
+      // write a clean stream instead of leaving a dead video box.
+      const onNativeError = () => {
+        videoEl.onerror = null;
+        if (token !== state.playerToken) return;
+        if (!videoEl.currentSrc || !videoEl.currentSrc.startsWith(info.url)) return;
+        const code = videoEl.error ? videoEl.error.code : 0;
+        if (!state.boot?.nativePlayer || !state.boot?.ffmpegOk || !info.streamMime) {
+          overlay.classList.remove('hidden');
+          overlay.innerHTML = `<div class="player-error">The webview could not decode this file${code ? ` (media error ${code})` : ''}. ${state.boot?.ffmpegOk ? 'Turn on the built-in player in Settings to decode it with ffmpeg.' : 'Install ffmpeg to decode it.'}</div>`;
+          return;
+        }
+        const at = Number.isFinite(videoEl.currentTime) ? videoEl.currentTime : 0;
+        if (!video.nativeFailed) {
+          video.nativeFailed = true;
+          invoke('mark_native_failed', { id: video.id })
+            .then(() => refreshMeta())
+            .catch(() => {});
+        }
+        toast('The webview could not decode this file; switching to the built-in player.');
+        playStream(videoEl, overlay, video, info.streamMime, at);
+      };
+      videoEl.onerror = onNativeError;
       videoEl.play().catch(() => {});
     } catch (err) {
       dropWarm();
@@ -2643,6 +2669,8 @@ function renderOld() {
       Files whose codecs the built-in player cannot decode, plus files with
       <span class="warn-inline">VFR</span> (variable frame rate) timestamps that make Chromium stutter �
       VLC smooths those over, the webview does not.
+      Files marked <span class="warn-inline">webview decode failed</span> have playable metadata but a
+      bitstream Chromium rejects; ffmpeg re-encodes them into a clean copy.
       <br><strong>Build playback cache</strong> converts into the cache, so playback starts instantly but the
       original files stay as they are. <strong>Convert to MP4</strong> writes a real
       <code>.mp4</code> next to the original, adds it to the library with the same tags, rating and flags,
@@ -2667,7 +2695,7 @@ function renderOld() {
           <tr data-id="${v.id}">
             <td><input type="checkbox" class="old-check" data-id="${v.id}" ${selected.has(v.id) ? 'checked' : ''}></td>
             <td><button class="link-btn fname" data-open="${v.id}" title="${esc(v.path)}">${esc(v.fileName)}</button></td>
-            <td class="mono small">${esc(v.vcodec || '?')}${v.vfr ? ' <span class="warn-inline">VFR</span>' : ''}</td>
+            <td class="mono small">${esc(v.vcodec || '?')}${v.vfr ? ' <span class="warn-inline">VFR</span>' : ''}${v.nativeFailed ? ' <span class="warn-inline">webview decode failed</span>' : ''}</td>
             <td class="small">${v.width ? `${v.width}\u00d7${v.height}` : '-'}</td>
             <td>${fmtSize(v.size)}</td>
             <td>${v.durationMs ? fmtDur(v.durationMs) : '-'}</td>

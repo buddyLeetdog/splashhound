@@ -555,6 +555,15 @@ pub async fn set_native_player(
     db::set_setting(&conn, "native_player", if enabled { "1" } else { "0" }).map_err(err)
 }
 
+/// Called by the UI when the webview's own decoder rejects a file. Stores the
+/// flag so the next play goes straight through the built-in player and the file
+/// is listed under Old codecs for conversion.
+#[tauri::command]
+pub async fn mark_native_failed(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    db::set_native_failed(&conn, id, true).map_err(err)
+}
+
 /// Which encoder the built-in player will use (`None` means libx264).
 #[tauri::command]
 pub async fn stream_encoder(state: State<'_, Arc<AppState>>) -> Result<Option<String>, String> {
@@ -594,7 +603,7 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
     // constant frame rate, so it also fixes stuttering VFR files. Remux cases
     // (browser codec, unusual container or audio) used to be copied into the
     // cache first, which cost several seconds per file; they stream instead.
-    if st.ffmpeg().is_none() && (mode != "direct" || video.vfr) {
+    if st.ffmpeg().is_none() && (mode != "direct" || video.vfr || video.native_failed) {
         return PlaybackInfo {
             mode,
             state: "error".into(),
@@ -608,7 +617,9 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
             stream_mime: None,
         };
     }
-    if (mode != "direct" || video.vfr) && st.setting("native_player").as_deref() != Some("0") {
+    if (mode != "direct" || video.vfr || video.native_failed)
+        && st.setting("native_player").as_deref() != Some("0")
+    {
         let (_, codec) = stream::profile_for(video.width, video.height);
         return PlaybackInfo {
             mode: "stream".into(),
@@ -621,13 +632,16 @@ fn playback_info(st: &Arc<AppState>, video: &db::VideoDto, start: bool) -> Playb
     }
 
     if mode == "direct" {
+        // Keep the stream MIME around as well: if the webview's decoder rejects
+        // a malformed file, the UI re-opens it through the built-in player.
+        let (_, codec) = stream::profile_for(video.width, video.height);
         return PlaybackInfo {
             mode,
             state: "ready".into(),
             url: Some(url),
             progress: 1.0,
             error: None,
-            stream_mime: None,
+            stream_mime: Some(format!("video/mp4; codecs=\"{codec},mp4a.40.2\"")),
         };
     }
 

@@ -319,6 +319,7 @@ pub fn run() {
             commands::cancel_prewarm,
             commands::set_prewarm_enabled,
             commands::set_native_player,
+            commands::mark_native_failed,
             commands::stream_encoder,
             commands::set_stream_window,
             commands::ensure_thumbs,
