@@ -1,6 +1,6 @@
 pkgbase = splashhound
 	pkgdesc = Local-first video library categorizer and viewer
-	pkgver = 1.3.0
+	pkgver = 1.3.1
 	pkgrel = 1
 	url = https://github.com/buddyLeetdog/splashhound
 	arch = x86_64
@@ -13,7 +13,7 @@ pkgbase = splashhound
 	depends = libayatana-appindicator
 	optdepends = ffmpeg: thumbnails, preview frames, playback of non-browser codecs and DNA analysis
 	optdepends = xdg-utils: "Show in folder"
-	source = splashhound-1.3.0.tar.gz::https://github.com/buddyLeetdog/splashhound/archive/refs/tags/v1.3.0.tar.gz
+	source = splashhound-1.3.1.tar.gz::https://github.com/buddyLeetdog/splashhound/archive/refs/tags/v1.3.1.tar.gz
 	sha256sums = SKIP
 
 pkgname = splashhound
