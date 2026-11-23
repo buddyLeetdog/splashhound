@@ -207,6 +207,32 @@ impl AppState {
     }
 }
 
+/// Stop WebView2 from showing its own saved-form/autofill popup. The app has
+/// its own suggestions for creators, tags and toys, and the browser list
+/// covers them.
+#[cfg(windows)]
+fn disable_webview_autofill(app: &tauri::App) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+    use windows_core::Interface;
+
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.with_webview(|webview| unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(settings) = core.Settings() else {
+            return;
+        };
+        let Ok(settings4) = settings.cast::<ICoreWebView2Settings4>() else {
+            return;
+        };
+        let _ = settings4.SetIsGeneralAutofillEnabled(false);
+        let _ = settings4.SetIsPasswordAutosaveEnabled(false);
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -285,10 +311,11 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 media::enforce_cache_limit(&cleanup);
             });
+            #[cfg(windows)]
+            disable_webview_autofill(app);
             app.manage(state);
             Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
+        })        .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
             commands::pick_folder,
             commands::set_root,

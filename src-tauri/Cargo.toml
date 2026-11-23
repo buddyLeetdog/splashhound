@@ -25,6 +25,10 @@ anyhow = "1.0.104"
 rfd = "0.17.2"
 futures-util = "0.3"
 
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39.1"
+windows-core = "0.62"
+
 [profile.dev]
 incremental = true
 

@@ -100,6 +100,30 @@ function ffmpegBinaryNames() {
   return isWindowsHost() ? 'ffmpeg.exe and ffprobe.exe' : 'ffmpeg and ffprobe';
 }
 
+/**
+ * Suppress the webview's own saved-form popup (Edge/WebView2 "saved
+ * information"). The app draws its own creator/tag/toy suggestions.
+ */
+function disableBrowserAutofill(root = document) {
+  root.querySelectorAll('input, textarea').forEach((el) => {
+    if (!el.hasAttribute('autocomplete')) el.setAttribute('autocomplete', 'off');
+  });
+}
+
+function watchAutofill(root) {
+  disableBrowserAutofill(root);
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      record.addedNodes.forEach((node) => {
+        if (node.nodeType !== 1) return;
+        if (node.matches('input, textarea')) node.setAttribute('autocomplete', 'off');
+        disableBrowserAutofill(node);
+      });
+    }
+  });
+  observer.observe(root, { childList: true, subtree: true });
+}
+
 function fmtSize(bytes) {
   if (!bytes) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -321,6 +345,7 @@ function promptDialog(title, label, initial = '') {
 window.addEventListener('DOMContentLoaded', init);
 
 async function init() {
+  watchAutofill(document.body);
   $$('.nav-item').forEach((b) => b.addEventListener('click', () => navigate(b.dataset.view)));
   const main = $('#main');
   main.addEventListener('scroll', maybeLoadMoreLibrary, { passive: true });
