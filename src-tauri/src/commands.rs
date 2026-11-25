@@ -5,7 +5,9 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::{config, convert, db, dna, media, prewarm, scan, stream, AppState, ScanStatus};
+use crate::{
+    config, convert, db, dna, media, prewarm, scan, stream, suggest, AppState, ScanStatus,
+};
 
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -562,6 +564,16 @@ pub async fn set_native_player(
 pub async fn mark_native_failed(state: State<'_, Arc<AppState>>, id: i64) -> Result<(), String> {
     let conn = state.inner().db.lock().map_err(err)?;
     db::set_native_failed(&conn, id, true).map_err(err)
+}
+
+/// Label proposals for one video, derived from its name and folder.
+#[tauri::command]
+pub async fn suggest_labels(
+    state: State<'_, Arc<AppState>>,
+    id: i64,
+) -> Result<Vec<suggest::Suggestion>, String> {
+    let conn = state.inner().db.lock().map_err(err)?;
+    suggest::suggest_for(&conn, id)
 }
 
 /// Which encoder the built-in player will use (`None` means libx264).

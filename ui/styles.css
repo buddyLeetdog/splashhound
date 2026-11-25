@@ -554,6 +554,17 @@ kbd {
 .chip.quick:hover { color: var(--text); border-color: #3a4856; }
 .chip.quick.toy { color: #d9c07a; }
 
+/* rule-based label proposals */
+.suggest-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
+.suggest-row:empty { display: none; }
+.suggest-label { font-size: 11px; color: var(--muted); margin-right: 2px; text-transform: uppercase; letter-spacing: 0.4px; }
+.chip.suggested {
+  background: rgba(53, 208, 165, 0.10); border-style: dashed;
+  border-color: rgba(53, 208, 165, 0.45); color: #bff3e4; font-size: 11px; padding: 2px 7px;
+}
+.chip.suggested:hover { background: rgba(53, 208, 165, 0.20); border-style: solid; }
+.chip.suggested .n { color: var(--accent-dim); }
+
 /* ---------- discreet mode ---------- */
 body.discreet .poster img,
 body.discreet .thumb img { filter: blur(16px); transition: filter 0.12s ease; }

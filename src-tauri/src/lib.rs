@@ -8,6 +8,7 @@ pub mod prewarm;
 pub mod scan;
 pub mod server;
 pub mod stream;
+pub mod suggest;
 
 use std::{
     collections::HashMap,
@@ -347,6 +348,7 @@ pub fn run() {
             commands::set_prewarm_enabled,
             commands::set_native_player,
             commands::mark_native_failed,
+            commands::suggest_labels,
             commands::stream_encoder,
             commands::set_stream_window,
             commands::ensure_thumbs,

@@ -1259,6 +1259,7 @@ function editorHtml(v, prefix, reviewedInitial) {
     <div class="field">
       <label>Creator</label>
       <input class="input" id="${prefix}-creator" placeholder="Unknown" value="${esc(v.creator || '')}">
+      <div class="suggest-row" id="${prefix}-creator-suggest"></div>
     </div>
     <div class="field">
       <label>Flags</label>
@@ -1279,12 +1280,14 @@ function editorHtml(v, prefix, reviewedInitial) {
     <div class="field">
       <label>Tags</label>
       <div class="chips chips-static" id="${prefix}-tagchips"></div>
+      <div class="suggest-row" id="${prefix}-tag-suggest"></div>
       <input class="input" id="${prefix}-taginput" placeholder="Type a tag and press Enter" style="margin-top:6px">
       <div class="quick-labels" id="${prefix}-tagquick"></div>
     </div>
     <div class="field">
       <label>Toys</label>
       <div class="chips chips-static" id="${prefix}-toychips"></div>
+      <div class="suggest-row" id="${prefix}-toy-suggest"></div>
       <input class="input" id="${prefix}-toyinput" placeholder="Add a toy and press Enter" style="margin-top:6px">
       <div class="quick-labels" id="${prefix}-toyquick"></div>
     </div>
@@ -1451,6 +1454,7 @@ function createEditor(root, prefix, video) {
     $$('[data-quick-tag]', wrap).forEach((b) => {
       b.onclick = () => addTag(b.dataset.quickTag);
     });
+    renderSuggestions();
   };
 
   const renderQuickToys = () => {
@@ -1467,6 +1471,43 @@ function createEditor(root, prefix, video) {
     $$('[data-quick-toy]', wrap).forEach((b) => {
       b.onclick = () => addToy(b.dataset.quickToy);
     });
+    renderSuggestions();
+  };
+
+  /**
+   * Rule-based proposals from the file name and folder (see suggest.rs). They
+   * are suggestions only: clicking one adds the label to the form, and nothing
+   * is stored until the video is saved.
+   */
+  const renderSuggestions = () => {
+    const kinds = [
+      { kind: 'creator', wrap: `#${prefix}-creator-suggest`, accept: (name) => { creatorInput.value = name; } },
+      { kind: 'tag', wrap: `#${prefix}-tag-suggest`, accept: (name) => addTag(name) },
+      { kind: 'toy', wrap: `#${prefix}-toy-suggest`, accept: (name) => addToy(name) },
+    ];
+    const chosenCreator = (creatorInput?.value || '').trim().toLowerCase();
+    for (const { kind, wrap, accept } of kinds) {
+      const el = $(wrap, root);
+      if (!el) continue;
+      const taken = new Set(
+        kind === 'tag' ? form.tags.map((t) => t.toLowerCase())
+          : kind === 'toy' ? form.toys.map((t) => t.toLowerCase())
+            : (chosenCreator ? [chosenCreator] : []),
+      );
+      const items = (video.suggestions || []).filter(
+        (s) => s.kind === kind && !taken.has(s.name.toLowerCase()),
+      );
+      el.innerHTML = items.length
+        ? `<span class="suggest-label">Suggested</span>${items.map((s) => `
+            <button type="button" class="chip suggested" data-suggest="${esc(s.name)}" data-suggest-kind="${kind}" title="${esc(s.reason)}">${esc(s.name)} <span class="n">+</span></button>`).join('')}`
+        : '';
+      $$('[data-suggest]', el).forEach((b) => {
+        b.onclick = () => {
+          accept(b.dataset.suggest);
+          renderSuggestions();
+        };
+      });
+    }
   };
 
   const creatorInput = $(`#${prefix}-creator`, root);
@@ -1498,6 +1539,18 @@ function createEditor(root, prefix, video) {
   renderStars();
   renderTags();
   renderToys();
+  renderSuggestions();
+
+  // Proposals load after the form is built so opening a video is never held up
+  // by them; the chips appear as soon as the rules have run.
+  if (video.id) {
+    invoke('suggest_labels', { id: video.id })
+      .then((items) => {
+        video.suggestions = items || [];
+        renderSuggestions();
+      })
+      .catch(() => {});
+  }
 
   return {
     form,
